@@ -94,6 +94,57 @@ Establish baseline measurements and validate assumptions before making changes.
 
 ---
 
+### Phase 0.5: Max Patch UI Message Wiring
+**Risk: Low | Effort: 1-2 hours**
+
+Set up the Max patch to send properly formatted messages from UI objects to JS. This must be done before Phase 3 so the JS handlers have correctly formatted input.
+
+#### Background
+
+The Max UI objects (step toggles, number boxes, etc.) need to send messages in a consistent format that the JS can parse. Currently the mute/pitch step UI sends an "active steps list" format (e.g., `4 7` meaning steps 4 and 7 are on). We need to:
+1. Prefix these with a message name so JS can route them
+2. Ensure all UI controls send to a dedicated path (future Inlet 2)
+
+#### Tasks
+
+- [ ] **0.5.1** Audit current UI object outputs in Permute.maxpat
+  - Document what each UI control currently outputs
+  - Identify which controls send to v8 and in what format
+  - Note any controls that bypass v8 entirely
+
+- [ ] **0.5.2** Wire mute step UI to send `mute_ui_steps` messages
+  - Add `[prepend mute_ui_steps]` after the mute step UI object
+  - Route to v8 inlet (currently inlet 0, will become inlet 2 in Phase 3)
+  - Test: Toggling steps should send `mute_ui_steps 0 2 4` etc.
+
+- [ ] **0.5.3** Wire pitch step UI to send `pitch_ui_steps` messages
+  - Add `[prepend pitch_ui_steps]` after the pitch step UI object
+  - Route to v8 inlet
+  - Test: Toggling steps should send `pitch_ui_steps 1 3 5` etc.
+
+- [ ] **0.5.4** Wire other UI controls with appropriate prefixes
+  - Length controls: `mute_ui_length`, `pitch_ui_length`
+  - Division controls: `mute_ui_division`, `pitch_ui_division`
+  - Temperature: `temperature_ui`
+  - Use `[prepend]` objects to add message names
+
+- [ ] **0.5.5** Add temporary JS handlers for new message formats
+  - In `anything()`, add routing for `mute_ui_steps`, `pitch_ui_steps`, etc.
+  - For now, these can call existing handlers (e.g., convert active steps list to pattern array and call existing pattern setter)
+  - This validates the wiring before Phase 3's full refactor
+
+- [ ] **0.5.6** Test round-trip behavior
+  - Toggle UI → JS receives correct message → state updates → OSC broadcasts
+  - Verify no regressions in current functionality
+
+#### Exit Criteria
+- All UI controls send named messages to v8
+- JS can parse and handle the new message formats
+- Existing functionality preserved
+- Ready for Phase 3 inlet separation (just need to change which inlet UI messages arrive on)
+
+---
+
 ### Phase 1: Outlet Separation (JS Only)
 **Risk: Medium | Effort: 3-4 hours**
 
@@ -294,6 +345,8 @@ Max UI commands ───► Inlet 2 ─► handleMaxCommand()          ▼
 
 - [ ] **3.5** Create `handleMaxUICommand()`
   - Process direct Max commands (mute step, pitch length, etc.)
+  - **Handle "active steps list" format** - Max UI sends `mute_ui_steps 4 7` meaning only steps 4 and 7 are on (see Appendix D)
+  - Parse active indices and convert to full pattern array
   - Update state
   - Skip UI output (outlet 0) - UI already reflects the change
   - Broadcast to OSC (outlet 1) - external world needs to know
@@ -491,3 +544,75 @@ Even with inlet-based routing, origin tags remain useful for frontend state cach
 | `pattr_restore` | Restored from Live Set | Apply full state |
 | `position` | Playhead moved | Update positions only |
 | `mute_step`, etc. | Echo of command | Skip (already have state) |
+
+## Appendix D: Max UI Message Formats
+
+### Active Steps List Format
+
+The Max UI objects for mute/pitch steps use a compact "active steps list" format rather than sending individual step values. This format sends only the indices of steps that are ON.
+
+**Format:**
+```
+mute_ui_steps [index1] [index2] ...
+pitch_ui_steps [index1] [index2] ...
+```
+
+**Examples:**
+| UI State (steps 0-7) | Message Sent |
+|---------------------|--------------|
+| Steps 4 and 7 on | `mute_ui_steps 4 7` |
+| Steps 0, 2, 4, 6 on | `mute_ui_steps 0 2 4 6` |
+| All steps off | `mute_ui_steps` (no args) |
+| All steps on | `mute_ui_steps 0 1 2 3 4 5 6 7` |
+
+**Parsing Logic for `handleMaxUICommand()`:**
+```javascript
+function parseActiveStepsList(args, patternLength) {
+    // Initialize all steps to 0 (off)
+    var pattern = [];
+    for (var i = 0; i < patternLength; i++) {
+        pattern[i] = 0;
+    }
+
+    // Set specified indices to 1 (on)
+    for (var j = 0; j < args.length; j++) {
+        var stepIndex = parseInt(args[j]);
+        if (stepIndex >= 0 && stepIndex < patternLength) {
+            pattern[stepIndex] = 1;
+        }
+    }
+
+    return pattern;
+}
+
+// In handleMaxUICommand():
+function handleMaxUICommand(messagename, args) {
+    if (messagename === 'mute_ui_steps') {
+        var pattern = parseActiveStepsList(args, sequencers.muteSequencer.length);
+        sequencers.muteSequencer.setPattern(pattern);
+        broadcastToOSC('mute_pattern');
+        broadcastToPattr();
+        // Note: Skip broadcastToUI() - UI already reflects the change
+    }
+    else if (messagename === 'pitch_ui_steps') {
+        var pattern = parseActiveStepsList(args, sequencers.pitchSequencer.length);
+        sequencers.pitchSequencer.setPattern(pattern);
+        broadcastToOSC('pitch_pattern');
+        broadcastToPattr();
+    }
+    // ... other UI commands
+}
+```
+
+**Why This Format?**
+- Max UI objects (like `[matrixctrl]` or step sequencer UIs) often output selected indices
+- More efficient for sparse patterns (few steps on)
+- Requires conversion to full pattern array in JS
+
+**Phase 3 Task Addition:**
+This format handling should be implemented in task 3.5 (`handleMaxUICommand()`). The function must:
+1. Recognize `mute_ui_steps` and `pitch_ui_steps` messages
+2. Parse the active indices list
+3. Convert to full 8-element pattern array
+4. Update sequencer state
+5. Broadcast to OSC and pattr (but NOT to UI)

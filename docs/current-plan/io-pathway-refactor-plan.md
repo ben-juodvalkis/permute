@@ -1,8 +1,10 @@
 # Implementation Plan: Separate Input/Output Pathways
 
 **Issue:** #3 - Refactor: Separate input/output pathways for UI and OSC
-**Status:** Planning
+**Status:** Blocked
 **Created:** 2026-01-26
+
+> **BLOCKER:** Before starting this refactor, we must fix Issue #4 - State not restoring properly when loading from saved Live Set. The pattr/state persistence mechanism needs to work correctly before we refactor its I/O pathways.
 
 ---
 

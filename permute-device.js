@@ -2505,8 +2505,8 @@ SequencerDevice.prototype.broadcastState = function(origin) {
     // args is: ["state_broadcast", trackIndex, origin, data...]
     // We want: ["pattr_state", trackIndex, data...] (skip origin at index 2)
     // Skip for position updates - they happen constantly during playback and don't need persistence
-    // This also prevents the pattr feedback loop (pattr output -> restoreState -> broadcast -> pattr)
-    if (origin !== 'position') {
+    // Skip for pattr_restore - we just loaded from pattr, no need to save back (prevents feedback loop)
+    if (origin !== 'position' && origin !== 'pattr_restore') {
         var pattrArgs = ["pattr_state", args[1]].concat(args.slice(3));
         outlet.apply(null, [0].concat(pattrArgs));
     }
@@ -2833,23 +2833,25 @@ function setState(stateJson) {
 }
 
 /**
- * Restore state from pattr (30-arg list format, same as broadcast).
+ * Restore state from pattr (28-arg list format matching ADR-166).
  * Called on Live Set load via: [route pattr_state] -> [prepend restoreState] -> v8
  *
- * Args (30 total):
+ * Args (28 total):
  *   trackIndex (0),
  *   mutePattern[8] (1-8), muteLength (9), muteBars (10), muteBeats (11), muteTicks (12),
- *   mutePosition (13), muteEnabled (14),
- *   pitchPattern[8] (15-22), pitchLength (23), pitchBars (24), pitchBeats (25), pitchTicks (26),
- *   pitchPosition (27), pitchEnabled (28),
- *   temperature (29)
+ *   mutePosition (13),
+ *   pitchPattern[8] (14-21), pitchLength (22), pitchBars (23), pitchBeats (24), pitchTicks (25),
+ *   pitchPosition (26),
+ *   temperature (27)
+ *
+ * Note: muteEnabled/pitchEnabled removed in ADR-166 - now derived from pattern content.
  */
 function restoreState() {
     var args = arrayfromargs(arguments);
     post('[RESTORE] restoreState called with ' + args.length + ' args\n');
 
-    if (args.length < 30) {
-        post('[RESTORE] Not enough args, skipping\n');
+    if (args.length < 28) {
+        post('[RESTORE] Not enough args (expected 28, got ' + args.length + '), skipping\n');
         return;
     }
 
@@ -2867,8 +2869,8 @@ function restoreState() {
     var muteTicks = parseInt(args[idx++]);
     sequencer.sequencers.muteSequencer.division = [muteBars, muteBeats, muteTicks];
 
-    // Skip mute position and enabled (they're runtime state, not saved)
-    idx += 2;
+    // Skip mute position (runtime state, not saved)
+    idx += 1;
 
     // Pitch pattern (8 steps)
     for (var i = 0; i < 8; i++) {
@@ -2882,8 +2884,8 @@ function restoreState() {
     var pitchTicks = parseInt(args[idx++]);
     sequencer.sequencers.pitchSequencer.division = [pitchBars, pitchBeats, pitchTicks];
 
-    // Skip pitch position and enabled
-    idx += 2;
+    // Skip pitch position (runtime state, not saved)
+    idx += 1;
 
     // Temperature
     sequencer.temperatureValue = parseFloat(args[idx++]);

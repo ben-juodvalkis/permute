@@ -2505,8 +2505,8 @@ SequencerDevice.prototype.broadcastState = function(origin) {
     // args is: ["state_broadcast", trackIndex, origin, data...]
     // We want: ["pattr_state", trackIndex, data...] (skip origin at index 2)
     // Skip for position updates - they happen constantly during playback and don't need persistence
-    // This also prevents the pattr feedback loop (pattr output -> restoreState -> broadcast -> pattr)
-    if (origin !== 'position') {
+    // Skip for pattr_restore - we just loaded from pattr, no need to save back (prevents feedback loop)
+    if (origin !== 'position' && origin !== 'pattr_restore') {
         var pattrArgs = ["pattr_state", args[1]].concat(args.slice(3));
         outlet.apply(null, [0].concat(pattrArgs));
     }

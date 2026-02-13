@@ -43,6 +43,10 @@ Two separate pattr restoration mechanisms exist:
 
 It's unclear which fires in which scenarios, and they have completely different behavior.
 
+### Bug 4: `lastValues` not cleared on clip change during playback
+
+`onClipChanged()` (line 2523) clears temperature state and sequencer caches, but the comment on line 2541 says "lastValues are tracked per clipId, so no need to clear." This is misleading — the old clip's `lastValues` entry is orphaned and never cleaned up. More importantly, if the old clip had transformations applied (e.g., muted notes, pitch-shifted notes), those transformations are never reverted because `onClipChanged()` doesn't undo them. The clip is left in a modified state.
+
 ---
 
 ## Max/MSP JS Modularization Constraints
@@ -59,46 +63,14 @@ The `v8` object in Max 9 supports `require()` with CommonJS modules, but with li
 
 ## Phased Implementation
 
-### Phase 1: Fix the Immediate Bug
+### Phase 1: Fix State Persistence Bug & Consolidate Restoration Path
 **Risk: Low | Blocks: Everything else**
 
-Fix `restoreState()` and `broadcastState()` to eliminate the state reset.
+Fix `restoreState()` by rewriting it as a thin adapter that delegates to `setState()`, fix the init broadcast problem, and clean up debug logging. This combines the bug fix with path consolidation — there's no value in an intermediate step where `restoreState()` calls individual setters only to be rewritten immediately.
 
 #### Tasks
 
-- [ ] **1a** Fix `restoreState()` to use proper setter methods (lines 2852-2898)
-  - Replace `sequencer.sequencers.muteSequencer.pattern[i] = parseInt(args[idx++])` with building a pattern array and calling `setPattern()`
-  - Replace `.patternLength = parseInt(args[idx++])` with `setLength()`
-  - Replace `.division = [bars, beats, ticks]` with `setDivision([bars, beats, ticks], sequencer.timeSignatureNumerator)`
-  - Replace `.temperatureValue = parseFloat(args[idx++])` with `setTemperatureValue()`
-
-- [ ] **1b** Exclude `'init'` origin from pattr_state output (line 2512)
-  ```javascript
-  // Before:
-  if (origin !== 'position' && origin !== 'pattr_restore') {
-  // After:
-  if (origin !== 'position' && origin !== 'pattr_restore' && origin !== 'init') {
-  ```
-
-- [ ] **1c** Clean up excessive debug logging in `getvalueof()` / `setvalueof()` (lines 2955-3001)
-  - Reduce verbose investigation logging to single-line summaries
-  - Keep error logging
-
-#### Exit Criteria
-- State restores correctly when loading a Live Set
-- Sequencer responds to transport after restore (proves observers activated)
-- Changing a parameter doesn't reset state
-
----
-
-### Phase 2: Consolidate pattr Restoration to Single Path
-**Risk: Low | Depends on: Phase 1**
-
-Eliminate the dual-path problem by making `restoreState()` a thin adapter that delegates to `setState()`.
-
-#### Tasks
-
-- [ ] **2a** Rewrite `restoreState()` as a thin adapter
+- [ ] **1a** Rewrite `restoreState()` as a thin adapter (lines 2852-2898)
   - Parse flat 28-arg format into JSON state object
   - Delegate to `sequencer.setState()` (which already uses all proper setters)
   - Call `sequencer.broadcastState('pattr_restore')` after
@@ -136,29 +108,52 @@ Eliminate the dual-path problem by making `restoreState()` a thin adapter that d
   }
   ```
 
-- [ ] **2b** Keep `restoreState()` as adapter (don't remove yet)
+- [ ] **1b** Keep `restoreState()` as adapter (don't remove yet)
   - Full removal requires rewiring the Max patch, deferred to IO pathway refactor
   - The adapter pattern means we maintain only ONE restoration implementation (`setState`)
 
+- [ ] **1c** Exclude `'init'` origin from pattr_state output (line 2512)
+  ```javascript
+  // Before:
+  if (origin !== 'position' && origin !== 'pattr_restore') {
+  // After:
+  if (origin !== 'position' && origin !== 'pattr_restore' && origin !== 'init') {
+  ```
+
+- [ ] **1d** Clean up excessive debug logging in `getvalueof()` / `setvalueof()` (lines 2955-3001)
+  - Reduce verbose investigation logging to single-line summaries
+  - Keep error logging
+
 #### Exit Criteria
-- `restoreState()` delegates to `setState()` - no direct property writes
-- Same verification as Phase 1 still passes
+- `restoreState()` delegates to `setState()` — no direct property writes
+- State restores correctly when loading a Live Set
+- Sequencer responds to transport after restore (proves observers activated)
+- Changing a parameter doesn't reset state
 
 ---
 
-### Phase 3: Add Initialization Lifecycle Management
-**Risk: Low | Depends on: Phase 2**
+### Phase 2: Add Initialization Lifecycle Management
+**Risk: Low | Depends on: Phase 1**
 
 Add a proper init/restore lifecycle to prevent race conditions during startup.
 
+#### Max Initialization Sequence
+
+**Important:** Before implementing, investigate and document the actual Max initialization order by adding temporary logging to `init()`, `restoreState()`, and `setvalueof()`. The expected sequence is:
+
+1. `loadbang()` / `bang()` → `init()` fires first
+2. pattr fires `restoreState()` (flat format via Max patch routing) and/or `setvalueof()` (JSON via pattrstorage)
+
+**Open question:** Can both `restoreState()` and `setvalueof()` fire on the same load? If so, which fires first? The `initialized` flag implementation must handle both single and double restoration gracefully. If both fire, the second call is harmless (setState is idempotent for same data), but this should be verified.
+
 #### Tasks
 
-- [ ] **3a** Add `initialized` flag to `SequencerDevice` constructor (around line 1047)
+- [ ] **2a** Add `initialized` flag to `SequencerDevice` constructor (around line 1047)
   ```javascript
   this.initialized = false;
   ```
 
-- [ ] **3b** Guard pattr_state output with initialized flag in `broadcastState()` (line 2512)
+- [ ] **2b** Guard pattr_state output with initialized flag in `broadcastState()` (line 2512)
   ```javascript
   if (this.initialized && origin !== 'position' && origin !== 'pattr_restore' && origin !== 'init') {
       var pattrArgs = ["pattr_state", args[1]].concat(args.slice(3));
@@ -166,22 +161,27 @@ Add a proper init/restore lifecycle to prevent race conditions during startup.
   }
   ```
 
-- [ ] **3c** Set `initialized = true` at end of `init()` (after line 1334)
+- [ ] **2c** Set `initialized = true` at end of `init()` (after line 1334)
   ```javascript
   this.initialized = true;
   ```
 
-- [ ] **3d** Also set `initialized = true` in `restoreState()` and `setvalueof()`
+- [ ] **2d** Also set `initialized = true` in `restoreState()` and `setvalueof()`
   - Ensures the flag is set regardless of which path runs last
+
+- [ ] **2e** Add temporary initialization sequence logging (remove before final commit)
+  - Log with timestamps in `init()`, `restoreState()`, and `setvalueof()` to document the actual Max startup order
+  - Record findings in the ADR for Phase 5
 
 #### Exit Criteria
 - No pattr_state output during init/restore window
 - Device functions normally after initialization completes
+- Max initialization sequence documented from empirical testing
 
 ---
 
-### Phase 4: Modularize into Focused Files
-**Risk: Medium | Depends on: Phase 3**
+### Phase 3: Modularize into Focused Files
+**Risk: Medium | Depends on: Phase 2**
 
 Extract logical units into separate CommonJS modules. All files placed alongside `permute-device.js` (flat structure per Max constraint).
 
@@ -196,7 +196,10 @@ Extract logical units into separate CommonJS modules. All files placed alongside
 | `permute-state.js` | Lines 549-635 | `TrackState`, `ClipState`, `TransportState` | 90 |
 | `permute-instruments.js` | Lines 636-787 | `InstrumentDetector`, strategy classes | 155 |
 | `permute-commands.js` | Lines 961-995 | `CommandRegistry` class | 35 |
-| `permute-temperature.js` | Lines 338-493 + 1843-2147 | Temperature helpers + SequencerDevice temperature mixin | 460 |
+| `permute-shuffle.js` | Lines 338-493 | Pure functions: `fisherYatesShuffle`, `generateSwapPattern`, `applySwapPattern` | 160 |
+| `permute-temperature.js` | Lines 1843-2147 | SequencerDevice temperature mixin only | 310 |
+
+**Note:** Temperature is split into two files. `permute-shuffle.js` contains pure, testable functions with no device coupling. `permute-temperature.js` contains only the `SequencerDevice` prototype methods (the mixin). This separation makes the shuffle logic independently testable and keeps the mixin focused on device integration.
 
 #### Module Pattern
 
@@ -222,6 +225,7 @@ var ObserverRegistry = require('permute-observer-registry').ObserverRegistry;
 var stateClasses = require('permute-state');
 var instruments = require('permute-instruments');
 var CommandRegistry = require('permute-commands').CommandRegistry;
+var shuffle = require('permute-shuffle');
 var temperature = require('permute-temperature');
 ```
 
@@ -231,6 +235,8 @@ Temperature methods live on `SequencerDevice.prototype` but are logically separa
 
 ```javascript
 // permute-temperature.js
+var shuffle = require('permute-shuffle');
+
 function applyTemperatureMethods(proto) {
     proto.setTemperatureValue = function(value) { ... };
     proto.captureTemperatureState = function(clipId) { ... };
@@ -241,10 +247,7 @@ function applyTemperatureMethods(proto) {
 }
 
 module.exports = {
-    applyTemperatureMethods: applyTemperatureMethods,
-    fisherYatesShuffle: fisherYatesShuffle,
-    generateSwapPattern: generateSwapPattern,
-    applySwapPattern: applySwapPattern
+    applyTemperatureMethods: applyTemperatureMethods
 };
 ```
 
@@ -252,6 +255,38 @@ module.exports = {
 // permute-device.js (after SequencerDevice is defined)
 temperature.applyTemperatureMethods(SequencerDevice.prototype);
 ```
+
+#### Extract `getCurrentPitchOffset()` Helper
+
+The same pitch offset calculation is duplicated in three places:
+- `captureTemperatureState()` (lines 1958-1967) — calculates offset to get base pitch
+- `restoreTemperatureState()` (lines 2028-2037) — calculates adjustment for restore
+- `onTemperatureLoopJump()` (lines 2104-2115) — calculates adjustment for re-shuffle
+
+All three check `lastValues[clipId].pitch === 1` and `instrumentType !== 'parameter_transpose'` to decide whether to add/subtract `OCTAVE_SEMITONES`. Extract into a shared helper in `permute-temperature.js`:
+
+```javascript
+// Inside applyTemperatureMethods:
+proto._getCurrentPitchOffset = function(clipId) {
+    if (this.lastValues[clipId] && this.lastValues[clipId].pitch === 1
+        && this.instrumentType !== 'parameter_transpose') {
+        return OCTAVE_SEMITONES;
+    }
+    return 0;
+};
+```
+
+Then `captureTemperatureState` uses `-this._getCurrentPitchOffset(clipId)`, while `restoreTemperatureState` and `onTemperatureLoopJump` use `+this._getCurrentPitchOffset(clipId)`.
+
+#### Consolidate Dual Value Tracking
+
+The codebase has two overlapping tracking mechanisms:
+- `Sequencer.lastAppliedValue` — used only in the `parameter_transpose` pitch path (line 2348)
+- `SequencerDevice.lastValues[clipId]` — used everywhere else for delta tracking
+
+These serve different purposes (`lastAppliedValue` is clip-independent for parameter-based transpose; `lastValues` is per-clip for note-based operations), but the naming overlap is confusing. During modularization:
+- Rename `Sequencer.lastAppliedValue` to `Sequencer.lastParameterValue` to clarify its scope
+- Add a comment in `Sequencer` class explaining the distinction
 
 #### Main File After Modularization (~1200 lines)
 
@@ -273,32 +308,34 @@ Global functions MUST stay in the main file because Max's `v8` object only expos
 
 #### Tasks
 
-- [ ] **4.1** Create `permute-constants.js` - extract constants, config, value types
-- [ ] **4.2** Create `permute-utils.js` - extract utilities (depends on constants)
-- [ ] **4.3** Create `permute-sequencer.js` - extract Sequencer class (depends on constants)
-- [ ] **4.4** Create `permute-observer-registry.js` - extract ObserverRegistry (no dependencies)
-- [ ] **4.5** Create `permute-state.js` - extract TrackState, ClipState, TransportState (no dependencies)
-- [ ] **4.6** Create `permute-instruments.js` - extract InstrumentDetector and strategies (depends on constants, utils)
-- [ ] **4.7** Create `permute-commands.js` - extract CommandRegistry (depends on utils)
-- [ ] **4.8** Create `permute-temperature.js` - extract temperature helpers and mixin (depends on constants, utils)
-- [ ] **4.9** Update `permute-device.js` - add requires, remove extracted code, apply temperature mixin
-- [ ] **4.10** Verify device loads and all functionality works
+- [ ] **3.1** Create `permute-constants.js` - extract constants, config, value types
+- [ ] **3.2** Create `permute-utils.js` - extract utilities (depends on constants)
+- [ ] **3.3** Create `permute-sequencer.js` - extract Sequencer class (depends on constants); rename `lastAppliedValue` → `lastParameterValue`
+- [ ] **3.4** Create `permute-observer-registry.js` - extract ObserverRegistry (no dependencies)
+- [ ] **3.5** Create `permute-state.js` - extract TrackState, ClipState, TransportState (no dependencies)
+- [ ] **3.6** Create `permute-instruments.js` - extract InstrumentDetector and strategies (depends on constants, utils)
+- [ ] **3.7** Create `permute-commands.js` - extract CommandRegistry (depends on utils)
+- [ ] **3.8** Create `permute-shuffle.js` - extract pure shuffle/swap functions (depends on constants)
+- [ ] **3.9** Create `permute-temperature.js` - extract temperature mixin with `_getCurrentPitchOffset()` helper (depends on constants, utils, shuffle)
+- [ ] **3.10** Update `permute-device.js` - add requires, remove extracted code, apply temperature mixin
+- [ ] **3.11** Verify device loads and all functionality works
 
 #### Exit Criteria
 - `permute-device.js` reduced from ~3000 to ~1200 lines
 - All modules load via `require()` without errors
+- Pitch offset calculation exists in exactly one place (`_getCurrentPitchOffset`)
 - Full verification suite passes (same as Phase 1 criteria)
 - No behavioral changes - pure structural refactor
 
 ---
 
-### Phase 5: Documentation
+### Phase 4: Documentation
 **Risk: None**
 
-- [ ] **5.1** Create `docs/adr/003-robust-state-restoration.md` documenting Phases 1-3
-- [ ] **5.2** Create `docs/adr/004-modularization.md` documenting Phase 4
-- [ ] **5.3** Update `CLAUDE.md` key files table with new module files
-- [ ] **5.4** Update `docs/api.md` if any broadcast behavior changes
+- [ ] **4.1** Create `docs/adr/003-robust-state-restoration.md` documenting Phases 1-2
+- [ ] **4.2** Create `docs/adr/004-modularization.md` documenting Phase 3
+- [ ] **4.3** Update `CLAUDE.md` key files table with new module files
+- [ ] **4.4** Update `docs/api.md` if any broadcast behavior changes
 
 ---
 
@@ -306,9 +343,9 @@ Global functions MUST stay in the main file because Max's `v8` object only expos
 
 | Commit | Phases | Risk | Description |
 |--------|--------|------|-------------|
-| 1 | 1 + 2 + 3 | Low | Fix state persistence bug + consolidate + lifecycle guard |
-| 2 | 4 | Medium | Modularize into focused files |
-| 3 | 5 | None | Documentation |
+| 1 | 1 + 2 | Low | Fix state persistence bug, consolidate restoration path, add lifecycle guard |
+| 2 | 3 | Medium | Modularize into focused files |
+| 3 | 4 | None | Documentation |
 
 ---
 
@@ -321,6 +358,30 @@ After each commit:
 4. Change a parameter (toggle a mute step) - state should NOT reset
 5. Stop/restart transport - patterns should persist
 6. Check Max console - clean logging, no errors, no excessive debug spam
+
+---
+
+## Known Issues (Out of Scope)
+
+These issues were identified during analysis but are out of scope for this refactor. They should be tracked separately.
+
+### `lastValues` not cleaned up on clip change
+
+`onClipChanged()` (line 2523) doesn't revert transformations on the old clip or clean up its `lastValues` entry. If the user switches clips during playback, the old clip is left in a modified state (muted notes, shifted pitches). The comment on line 2541 ("no need to clear") is misleading — the old clip's transformations are orphaned.
+
+**Why out of scope:** Fixing this properly requires reverting transformations on the old clip before switching, which touches the batch system and clip lifecycle. This is better addressed in a dedicated clip-management improvement.
+
+### No error handling in temperature hot-path Live API calls
+
+`clip.call("get_all_notes_extended")` in `onTemperatureLoopJump()` (line 2100), `captureTemperatureState()` (line 1945), and `restoreTemperatureState()` (line 2014) can fail silently if a clip becomes invalid mid-operation (user deletes it). `restoreTemperatureState()` has try-catch around `apply_note_modifications` (line 2061) but the other two don't.
+
+**Why out of scope:** Adding error handling here is straightforward but should be part of a broader error-handling pass, not mixed into a state persistence fix.
+
+### Parameter scan limit of 17 is fragile
+
+`findTransposeParameterByName()` (line ~229) limits scanning to 17 parameters, based on typical rack macro count. Devices with more parameters won't have their transpose parameter detected.
+
+**Why out of scope:** This is a detection limitation, not a state persistence issue. Could be made configurable or increased in a separate improvement.
 
 ---
 
@@ -349,9 +410,11 @@ permute-constants.js          (no deps)
     |       |
     |       +-- permute-instruments.js  (depends on constants, utils)
     |       +-- permute-commands.js     (depends on utils)
-    |       +-- permute-temperature.js  (depends on constants, utils)
+    |       +-- permute-temperature.js  (depends on constants, utils, shuffle)
     |
     +-- permute-sequencer.js  (depends on constants)
+    |
+    +-- permute-shuffle.js    (depends on constants)
 
 permute-observer-registry.js  (no deps)
 permute-state.js              (no deps)

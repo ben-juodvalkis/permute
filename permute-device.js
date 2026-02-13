@@ -1,40 +1,12 @@
 /**
  * permute-device.js - Dual mute/pitch sequencer for Max4Live
  *
- * A comprehensive step sequencer that provides synchronized mute and pitch
- * sequencing for both MIDI and audio clips in Ableton Live.
+ * Main device controller. Coordinates sequencers, observers, transport handling,
+ * clip management, and state persistence.
  *
- * Features:
- * - Dual independent sequencers (mute and pitch)
- * - 8-64 step patterns
- * - Intelligent instrument detection (DrumRack vs other instruments)
- * - Three-tier pitch handling: DrumRack device transpose, MIDI note modification, audio clip parameters
- * - Works with MIDI and audio clips
- * - Bar.beat.tick timing format
- * - Auto-reset on transport stop
- * - Real-time pattern editing
- * - Reversible temperature transformation (v3.1)
+ * Modularized in v4.3: core logic split into focused CommonJS modules.
  *
- * v3.0 Architecture:
- * - Direct clip modification (no layer system)
- * - Transport-scoped pristine state (captured on start, restored on stop)
- * - Simple batching queue (accumulates changes, applies in 1ms)
- * - Natural transformation composition (each reads current clip state)
- * - Temperature as separate path (triggered by loop_jump observer)
- * - Instrument strategy pattern for pitch transposition
- * - Value type system for validation
- * - ObserverRegistry (centralized observer management)
- * - CommandRegistry (cleaner message dispatch)
- *
- * v3.1 Temperature Enhancements (Issue #177):
- * - Note ID-based tracking for reversible temperature transformations
- * - Value-based enable/disable: temp > 0 captures, temp = 0 restores
- * - Handles overdubbing gracefully (new notes preserved on restore)
- * - Handles note deletion gracefully (missing IDs skipped)
- * - Proper interaction with pitch sequencer state
- *
- * @version 3.1
- * @author [Built interactively via Claude]
+ * @version 4.3
  * @requires Max4Live JavaScript API
  */
 
@@ -42,955 +14,41 @@ autowatch = 1;
 inlets = 1;
 outlets = 1; // UI feedback only
 
-// ===== Configuration =====
-// Transpose configuration for pitch sequencer
-var TRANSPOSE_CONFIG = {
-    parameterNames: [
-        { name: "custom e", shiftAmount: 21 },
-        { name: "pitch", shiftAmount: 16 },
-        { name: "transpose", shiftAmount: 16 },
-        { name: "octave", shiftAmount: 16 }
-    ],
-    defaultShiftAmount: 12
-};
-
-// ===== CONSTANTS =====
-var TICKS_PER_QUARTER_NOTE = 480;
-var MIDI_MIN = 0;
-var MIDI_MAX = 127;
-var OCTAVE_SEMITONES = 12;
-var DEFAULT_TIME_SIGNATURE = 4;
-var MAX_PATTERN_LENGTH = 64;
-var MIN_PATTERN_LENGTH = 1;
-var DEFAULT_GAIN_VALUE = 1.0;
-var MUTED_GAIN = 0.0;
-var DEFAULT_DRUM_RACK_TRANSPOSE = 64;
-var INVALID_LIVE_API_ID = "0";
-var TASK_SCHEDULE_DELAY = 1;
-
-// ===== VALUE TYPES =====
-
-/**
- * Value type definitions for different sequencer types.
- * Each type defines validation, default value, and range.
- */
-var VALUE_TYPES = {
-    binary: {
-        validate: function(v) { return v === 0 || v === 1; },
-        default: 0,
-        range: [0, 1],
-        description: "On/Off (0 or 1)"
-    },
-    midi_range: {
-        validate: function(v) { return v >= MIDI_MIN && v <= MIDI_MAX; },
-        default: 64,
-        range: [MIDI_MIN, MIDI_MAX],
-        description: "MIDI value (0-127)"
-    },
-    normalized: {
-        validate: function(v) { return v >= 0.0 && v <= 1.0; },
-        default: 0.5,
-        range: [0.0, 1.0],
-        description: "Normalized (0.0-1.0)"
-    },
-    semitones: {
-        validate: function(v) { return v >= -48 && v <= 48; },
-        default: 0,
-        range: [-48, 48],
-        description: "Semitones (-48 to +48)"
-    }
-};
-
-// ===== UTILITIES =====
-
-var DEBUG_MODE = false; // Set to true for development
-
-/**
- * Debug logging utility.
- * Only logs when DEBUG_MODE is enabled.
- *
- * @param {string} context - Context/location of the log
- * @param {string} message - Message to log
- * @param {*} data - Optional data to include
- */
-function debug(context, message, data) {
-    if (DEBUG_MODE) {
-        var output = "[Sequencer DEBUG:" + context + "] " + message;
-        if (data !== undefined) {
-            output += " | Data: " + JSON.stringify(data);
-        }
-        post(output + "\n");
-    }
-}
-
-/**
- * Handle errors consistently throughout the device.
- * Logs errors to the Max console based on DEBUG_MODE and criticality.
- *
- * @param {string} context - Where the error occurred (e.g., "parseNotesResponse", "init")
- * @param {Error|string} error - The error that occurred
- * @param {boolean} isCritical - If true, always log; if false, only log in DEBUG_MODE
- */
-function handleError(context, error, isCritical) {
-    if (DEBUG_MODE || isCritical) {
-        var errorMsg = error.toString ? error.toString() : String(error);
-        post("[Sequencer ERROR:" + context + "] " + errorMsg + "\n");
-    }
-}
-
-function post_error(msg) {
-    error("[Sequencer ERROR] " + msg + "\n");
-}
-
-/**
- * Parse notes response from Live API call.
- * Handles both string JSON format and array format.
- *
- * @param {*} notesJson - Response from get_all_notes_extended
- * @returns {Object|null} - Parsed notes object with {notes: [...]} or null
- */
-function parseNotesResponse(notesJson) {
-    if (!notesJson) return null;
-
-    if (typeof notesJson === "string") {
-        try {
-            var parsed = JSON.parse(notesJson);
-            if (parsed && parsed.notes && Array.isArray(parsed.notes)) {
-                return parsed;
-            } else if (Array.isArray(parsed)) {
-                return { notes: parsed };
-            }
-        } catch (error) {
-            handleError("parseNotesResponse", error, false);
-        }
-    } else if (Array.isArray(notesJson)) {
-        return { notes: notesJson };
-    }
-
-    return null;
-}
-
-/**
- * Check if state change requires action.
- * Used by pitch sequencer to avoid unnecessary API calls.
- *
- * @param {boolean} shouldApply - Desired state
- * @param {boolean} currentState - Current state
- * @returns {boolean} - True if change is needed
- */
-function needsStateChange(shouldApply, currentState) {
-    return shouldApply !== currentState;
-}
-
-/**
- * Get cached parameter API reference for a device.
- * Creates a new LiveAPI object for the specified parameter.
- *
- * @param {LiveAPI} device - Device LiveAPI object
- * @param {number} paramIndex - Parameter index
- * @returns {LiveAPI} - Parameter LiveAPI object
- */
-function getDeviceParameter(device, paramIndex) {
-    var paramPath = device.path + " parameters " + paramIndex;
-    return new LiveAPI(paramPath);
-}
-
-/**
- * Find transpose parameter by scanning device parameters for known names.
- * Returns the first match based on priority order from config.
- * V4.0: Name-based parameter detection (case-insensitive, exact match).
- *
- * Performance: Scans up to 17 parameters (typical rack macro count).
- * Called once per device load, not per-step.
- *
- * @param {LiveAPI} device - Device to scan
- * @returns {Object|null} - { index, param, shiftAmount, name } or null if not found
- */
-function findTransposeParameterByName(device) {
-    if (!device || device.id === INVALID_LIVE_API_ID) return null;
-
-    try {
-        var nameConfig = TRANSPOSE_CONFIG.parameterNames;
-        if (!nameConfig || nameConfig.length === 0) return null;
-
-        // Build lookup map (lowercase name -> config)
-        var nameLookup = {};
-        var priorityOrder = [];
-        for (var i = 0; i < nameConfig.length; i++) {
-            var entry = nameConfig[i];
-            var lowerName = entry.name.toLowerCase();
-            nameLookup[lowerName] = entry;
-            priorityOrder.push(lowerName);
-        }
-
-        // Get parameter count - limit to 17 (typical rack macro count from constants.json)
-        var params = device.get("parameters");
-        if (!params) return null;
-        var paramCount = Math.min(Math.floor(params.length / 2), 17);  // Live returns [id, id, id...]
-        if (paramCount === 0) return null;
-
-        // Scan parameters, collecting matches
-        var matches = {};  // lowerName -> { index, param }
-        for (var i = 0; i < paramCount; i++) {
-            var param = getDeviceParameter(device, i);
-
-            // Validate LiveAPI object before use
-            if (!param || param.id === INVALID_LIVE_API_ID) continue;
-
-            var nameResult = param.get("name");
-            if (nameResult && nameResult[0]) {
-                var paramName = nameResult[0].toLowerCase();
-                if (nameLookup[paramName]) {
-                    matches[paramName] = { index: i, param: param };
-                }
-            }
-        }
-
-        // Return highest priority match
-        for (var i = 0; i < priorityOrder.length; i++) {
-            var name = priorityOrder[i];
-            if (matches[name]) {
-                var config = nameLookup[name];
-                debug("transpose", "Found '" + name + "' at param " + matches[name].index);
-                return {
-                    index: matches[name].index,
-                    param: matches[name].param,
-                    shiftAmount: config.shiftAmount,
-                    name: name
-                };
-            }
-        }
-
-        return null;  // No matching parameter found
-    } catch (error) {
-        handleError("findTransposeParameterByName", error, false);
-        return null;
-    }
-}
-
-/**
- * Create and configure a LiveAPI observer.
- * Centralizes the observer creation pattern used throughout the device.
- *
- * @param {string} path - LiveAPI path to observe
- * @param {string} property - Property to observe
- * @param {Function} callback - Callback function to execute on property change
- * @returns {LiveAPI} - Configured LiveAPI observer
- */
-function createObserver(path, property, callback) {
-    var observer = new LiveAPI(callback);
-    observer.path = path;
-    observer.property = property;
-    return observer;
-}
-
-/**
- * Helper for deferred execution to break out of observer context.
- * Live API calls from within observers must be deferred to avoid
- * "Changes cannot be triggered by notifications" errors.
- *
- * @param {Function} callback - Function to execute on next tick
- */
-function defer(callback) {
-    // Use Task to break observer context if available
-    if (typeof Task !== 'undefined') {
-        var t = new Task(callback, this);
-        t.schedule(TASK_SCHEDULE_DELAY); // Schedule for next tick
-    } else {
-        // Fallback to setTimeout-like behavior
-        callback.apply(this);
-    }
-}
-
-/**
- * Calculate ticks per step based on division and time signature.
- * @param {Array|string} division - Division format
- * @param {number} timeSignature - Time signature numerator
- * @returns {number} - Ticks per step
- */
-function calculateTicksPerStep(division, timeSignature) {
-    if (typeof division === "string") {
-        // Legacy string format
-        switch(division) {
-            case "1/1":  return TICKS_PER_QUARTER_NOTE * 4;
-            case "1/2":  return TICKS_PER_QUARTER_NOTE * 2;
-            case "1/4":  return TICKS_PER_QUARTER_NOTE;
-            case "1/8":  return TICKS_PER_QUARTER_NOTE / 2;
-            case "1/16": return TICKS_PER_QUARTER_NOTE / 4;
-            case "1/32": return TICKS_PER_QUARTER_NOTE / 8;
-            case "1/64": return TICKS_PER_QUARTER_NOTE / 16;
-            default: return TICKS_PER_QUARTER_NOTE / 4;
-        }
-    } else if (Array.isArray(division) && division.length === 3) {
-        // Bar.beat.tick format
-        var bars = division[0];
-        var beats = division[1];
-        var ticks = division[2];
-        var beatsPerBar = timeSignature || DEFAULT_TIME_SIGNATURE;
-        return (bars * beatsPerBar * TICKS_PER_QUARTER_NOTE) +
-               (beats * TICKS_PER_QUARTER_NOTE) +
-               ticks;
-    }
-
-    return TICKS_PER_QUARTER_NOTE / 4; // Default to 16th notes
-}
-
-// ===== V3.0 HELPER FUNCTIONS =====
-
-/**
- * Fisher-Yates shuffle algorithm.
- * Used by temperature transformation for random pitch swapping.
- *
- * @param {Array} array - Array to shuffle
- * @returns {Array} - Shuffled copy
- */
-function fisherYatesShuffle(array) {
-    var shuffled = array.slice();
-    for (var i = shuffled.length - 1; i > 0; i--) {
-        var j = Math.floor(Math.random() * (i + 1));
-        var temp = shuffled[i];
-        shuffled[i] = shuffled[j];
-        shuffled[j] = temp;
-    }
-    return shuffled;
-}
-
-/**
- * Generate swap pattern for temperature transformation.
- * Creates shuffle groups based on temperature value (0.0-1.0).
- *
- * Temperature ranges:
- *   0.0-0.33: Pairs only (2 notes)
- *   0.34-0.66: Mix of pairs and triplets (2-3 notes)
- *   0.67-1.0: Larger groups (2-5 notes)
- *
- * @param {Array} notes - Array of note objects with start_time and pitch
- * @param {number} temperature - Temperature value (0.0-1.0)
- * @returns {Array} - Array of shuffle groups {indices: [...], shuffled: [...]}
- */
-function generateSwapPattern(notes, temperature) {
-    if (!notes || notes.length < 2) {
-        return [];
-    }
-
-    // Create array of indices and sort by start_time (temporal adjacency)
-    var sortedIndices = [];
-    for (var i = 0; i < notes.length; i++) {
-        sortedIndices.push({
-            originalIndex: i,
-            startTime: notes[i].start_time,
-            pitch: notes[i].pitch
-        });
-    }
-
-    sortedIndices.sort(function(a, b) {
-        return a.startTime - b.startTime;
-    });
-
-    // Create non-overlapping shuffle groups
-    var groups = [];
-    var used = [];
-    for (var i = 0; i < sortedIndices.length; i++) {
-        used.push(false);
-    }
-
-    // V3.1: Track if we've created at least one group
-    var hasCreatedGroup = false;
-
-    for (var i = 0; i < sortedIndices.length; i++) {
-        if (used[i]) continue;
-
-        // Should we form a group starting here?
-        var roll = Math.random();
-
-        // V3.1: Guarantee at least one swap when temp > 0
-        // On last available pair, force creation if no groups yet
-        var isLastChance = !hasCreatedGroup && (i >= sortedIndices.length - 2);
-        var shouldFormGroup = (roll < temperature) || isLastChance;
-
-        if (!shouldFormGroup) {
-            continue;
-        }
-
-        // Determine group size based on temperature
-        var desiredSize;
-        if (temperature < 0.34) {
-            desiredSize = 2;
-        } else if (temperature < 0.67) {
-            desiredSize = Math.random() < 0.6 ? 2 : 3;
-        } else {
-            var sizes = [2, 3, 4, 5];
-            var weights = [0.2, 0.3, 0.3, 0.2];
-            var roll2 = Math.random();
-            var cumulative = 0;
-            desiredSize = 3;
-            for (var k = 0; k < sizes.length; k++) {
-                cumulative += weights[k];
-                if (roll2 < cumulative) {
-                    desiredSize = sizes[k];
-                    break;
-                }
-            }
-        }
-
-        // Collect adjacent unused notes
-        var group = [];
-        for (var j = i; j < Math.min(i + desiredSize, sortedIndices.length); j++) {
-            if (!used[j]) {
-                group.push(sortedIndices[j].originalIndex);
-                used[j] = true;
-            }
-            if (group.length >= desiredSize) break;
-        }
-
-        // Need at least 2 notes to shuffle
-        if (group.length >= 2) {
-            var shuffledIndices = fisherYatesShuffle(group);
-            groups.push({
-                indices: group,
-                shuffled: shuffledIndices
-            });
-            hasCreatedGroup = true;  // V3.1: Mark that we've created a group
-        }
-    }
-
-    debug("temperature", "Generated " + groups.length + " shuffle groups (guaranteed min 1 when temp > 0)");
-    return groups;
-}
-
-/**
- * Apply swap pattern to notes.
- * Swaps pitches according to the shuffle groups.
- *
- * @param {Array} notes - Array of note objects (will be modified in place)
- * @param {Array} swapPattern - Array of shuffle groups from generateSwapPattern
- */
-function applySwapPattern(notes, swapPattern) {
-    if (!notes || !swapPattern || swapPattern.length === 0) return;
-
-    // Capture current pitches
-    var currentPitches = [];
-    for (var i = 0; i < notes.length; i++) {
-        currentPitches.push(notes[i].pitch);
-    }
-
-    // Apply swaps
-    for (var i = 0; i < swapPattern.length; i++) {
-        var group = swapPattern[i];
-        for (var j = 0; j < group.indices.length; j++) {
-            var targetIdx = group.indices[j];
-            var sourceIdx = group.shuffled[j];
-
-            // Validate indices before accessing
-            if (targetIdx < notes.length && sourceIdx < currentPitches.length) {
-                notes[targetIdx].pitch = currentPitches[sourceIdx];
-            } else {
-                debug("applySwapPattern", "Invalid index: targetIdx=" + targetIdx +
-                      ", sourceIdx=" + sourceIdx + ", noteCount=" + notes.length);
-            }
-        }
-    }
-}
-
-// ===== OBSERVER REGISTRY =====
-
-/**
- * ObserverRegistry - Centralized observer management.
- * Tracks all active observers and guarantees cleanup on error/destruction.
- */
-function ObserverRegistry() {
-    this.observers = {}; // name -> observer
-}
-
-/**
- * Register an observer.
- * @param {string} name - Unique name for this observer
- * @param {LiveAPI} observer - Observer object
- */
-ObserverRegistry.prototype.register = function(name, observer) {
-    if (this.observers[name]) {
-        this.unregister(name);
-    }
-    this.observers[name] = observer;
-};
-
-/**
- * Unregister an observer by name.
- * @param {string} name - Observer name
- */
-ObserverRegistry.prototype.unregister = function(name) {
-    if (this.observers[name]) {
-        this.observers[name].property = "";
-        delete this.observers[name];
-    }
-};
-
-/**
- * Clear all observers.
- */
-ObserverRegistry.prototype.clearAll = function() {
-    for (var name in this.observers) {
-        if (this.observers.hasOwnProperty(name)) {
-            this.observers[name].property = "";
-        }
-    }
-    this.observers = {};
-};
-
-/**
- * Get observer by name.
- * @param {string} name - Observer name
- * @returns {LiveAPI|null} - Observer or null
- */
-ObserverRegistry.prototype.get = function(name) {
-    return this.observers[name] || null;
-};
-
-// ===== STATE MANAGEMENT OBJECTS =====
-
-/**
- * TrackState - Encapsulates track-related state.
- */
-function TrackState() {
-    this.ref = null;       // LiveAPI track reference
-    this.id = null;        // Track ID
-    this.type = 'unknown'; // 'midi', 'audio', or 'unknown'
-    this.index = -1;       // Track index in session (for multi-track sequencer display)
-}
-
-TrackState.prototype.update = function(track) {
-    this.ref = track;
-    this.id = track ? track.id : null;
-    if (track) {
-        var hasMidiInput = track.get("has_midi_input");
-        var hasAudioInput = track.get("has_audio_input");
-        if (hasMidiInput && hasMidiInput[0] === 1) {
-            this.type = 'midi';
-        } else if (hasAudioInput && hasAudioInput[0] === 1) {
-            this.type = 'audio';
-        } else {
-            this.type = 'unknown';
-        }
-    } else {
-        this.type = 'unknown';
-    }
-};
-
-TrackState.prototype.reset = function() {
-    this.ref = null;
-    this.id = null;
-    this.type = 'unknown';
-    this.index = -1;
-};
-
-/**
- * Extract track index from LiveAPI path.
- * Path format: "live_set tracks N" or similar
- * @param {string} path - LiveAPI path string
- * @returns {number} - Track index or -1 if not found
- */
-TrackState.prototype.extractIndexFromPath = function(path) {
-    if (!path) return -1;
-    // Match "tracks N" in path like "live_set tracks 3"
-    var match = path.match(/tracks\s+(\d+)/);
-    if (match && match[1]) {
-        return parseInt(match[1], 10);
-    }
-    return -1;
-};
-
-/**
- * ClipState - Encapsulates clip-related state.
- */
-function ClipState() {
-    this.currentId = null;
-}
-
-ClipState.prototype.update = function(clipId) {
-    this.currentId = clipId;
-};
-
-ClipState.prototype.hasChanged = function(clipId) {
-    return this.currentId !== clipId;
-};
-
-ClipState.prototype.reset = function() {
-    this.currentId = null;
-};
-
-/**
- * TransportState - Encapsulates transport-related state.
- */
-function TransportState() {
-    this.isPlaying = false;
-}
-
-TransportState.prototype.setPlaying = function(playing) {
-    this.isPlaying = playing;
-};
-
-TransportState.prototype.reset = function() {
-    this.isPlaying = false;
-};
-
-// ===== INSTRUMENT DETECTOR HELPER =====
-
-/**
- * InstrumentDetector - Shared helper for finding instrument devices.
- * V4.0: Simplified to just find the device, not classify it.
- */
-function InstrumentDetector() {}
-
-/**
- * Find the first instrument device on a track.
- * V4.0: No longer classifies device type - just finds it.
- *
- * @param {LiveAPI} track - Track to analyze
- * @returns {Object|null} - { device, deviceId } or null
- */
-InstrumentDetector.findInstrumentDevice = function(track) {
-    if (!track) return null;
-
-    try {
-        var devices = track.get("devices");
-        if (!devices || devices.length === 0) return null;
-
-        for (var i = 0; i < devices.length; i++) {
-            var devicePath = track.path + " devices " + i;
-            var device = new LiveAPI(devicePath);
-
-            if (!device || device.id === INVALID_LIVE_API_ID) continue;
-
-            var deviceType = device.get("type");
-            var isInstrument = (deviceType && (deviceType[0] === "instrument" || deviceType[0] === 1));
-
-            if (isInstrument) {
-                return {
-                    device: device,
-                    deviceId: device.id
-                };
-            }
-        }
-    } catch (error) {
-        handleError("InstrumentDetector.findInstrumentDevice", error, false);
-    }
-
-    return null;
-};
-
-// ===== INSTRUMENT STRATEGY PATTERN =====
-
-/**
- * InstrumentStrategy - Base class for instrument-specific pitch handling.
- */
-function InstrumentStrategy(device) {
-    this.device = device;
-    this.originalTranspose = null;
-}
-
-InstrumentStrategy.prototype.applyTranspose = function(value) {
-    // Override in subclasses
-};
-
-InstrumentStrategy.prototype.revertTranspose = function() {
-    // Override in subclasses
-};
-
-/**
- * TransposeStrategy - Unified parameter-based pitch transposition.
- * V4.0: Single strategy for all devices with named transpose parameters.
- * Works for drum racks, instrument racks, and any device with a transpose macro.
- *
- * @param {LiveAPI} device - Device containing the transpose parameter
- * @param {LiveAPI} transposeParam - The transpose parameter API object
- * @param {number} shiftAmount - Amount to shift for octave (16 or 21)
- * @param {string} paramName - Name of the parameter (for debugging)
- */
-function TransposeStrategy(device, transposeParam, shiftAmount, paramName) {
-    InstrumentStrategy.call(this, device);
-    this.transposeParam = transposeParam;
-    this.shiftAmount = shiftAmount;
-    this.paramName = paramName;
-}
-TransposeStrategy.prototype = Object.create(InstrumentStrategy.prototype);
-TransposeStrategy.prototype.constructor = TransposeStrategy;
-
-TransposeStrategy.prototype.applyTranspose = function(shouldShiftUp) {
-    debug("transpose", "applyTranspose(" + shouldShiftUp + ") called, originalTranspose=" + this.originalTranspose);
-
-    if (!this.device || !this.transposeParam) {
-        debug("transpose", "applyTranspose BAIL: missing device or param");
-        return;
-    }
-
-    try {
-        // Check if transposeParam is still valid
-        if (this.transposeParam.id === INVALID_LIVE_API_ID) {
-            debug("transpose", "applyTranspose BAIL: param id invalid");
-            return;
-        }
-
-        var currentTranspose = this.transposeParam.get("value");
-        var currentValue = currentTranspose ? currentTranspose[0] : DEFAULT_DRUM_RACK_TRANSPOSE;
-        debug("transpose", "currentValue from param: " + currentValue);
-
-        if (this.originalTranspose === null) {
-            this.originalTranspose = currentValue;
-            debug("transpose", "captured originalTranspose=" + currentValue);
-        }
-
-        var newValue;
-        if (shouldShiftUp) {
-            newValue = this.originalTranspose + this.shiftAmount;
-        } else {
-            newValue = this.originalTranspose;
-        }
-
-        newValue = Math.max(MIDI_MIN, Math.min(MIDI_MAX, newValue));
-        debug("transpose", "setting param to " + newValue + " (original=" + this.originalTranspose + ", shift=" + this.shiftAmount + ")");
-        this.transposeParam.set("value", newValue);
-
-        debug("transpose", "Applied " + (shouldShiftUp ? "+" : "") +
-              this.shiftAmount + " via '" + this.paramName + "' param");
-    } catch (error) {
-        handleError("TransposeStrategy.applyTranspose", error, false);
-    }
-};
-
-TransposeStrategy.prototype.revertTranspose = function() {
-    debug("transpose", "revertTranspose called, originalTranspose=" + this.originalTranspose);
-    this.applyTranspose(false);
-    debug("transpose", "revertTranspose complete");
-    // Do not reset originalTranspose here - it must persist across transport
-    // cycles to prevent octave jumping on stop/restart (issue #9).
-    // It is naturally reset when a new strategy instance is created via
-    // detectInstrumentType().
-};
-
-/**
- * DefaultInstrumentStrategy - Default (no device-based transpose).
- */
-function DefaultInstrumentStrategy() {
-    InstrumentStrategy.call(this, null);
-}
-DefaultInstrumentStrategy.prototype = Object.create(InstrumentStrategy.prototype);
-DefaultInstrumentStrategy.prototype.constructor = DefaultInstrumentStrategy;
-
-DefaultInstrumentStrategy.prototype.applyTranspose = function(value) {
-    // No-op for default instruments
-};
-
-DefaultInstrumentStrategy.prototype.revertTranspose = function() {
-    // No-op for default instruments
-};
-
-// ===== GENERIC SEQUENCER CLASS =====
-
-/**
- * Generic sequencer that manages pattern, timing, and step progression.
- * Wraps a Transformation and adds step-based control.
- *
- * @param {string} name - Sequencer name (e.g., 'mute', 'pitch', 'velocity')
- * @param {Transformation} transformation - The transformation this sequencer controls
- * @param {string} valueType - Value type key from VALUE_TYPES
- * @param {number} patternLength - Initial pattern length (default 8)
- */
-function Sequencer(name, transformation, valueType, patternLength) {
-    this.name = name;
-    this.transformation = transformation; // Reference to transformation
-    this.valueType = VALUE_TYPES[valueType] || VALUE_TYPES.binary;
-    this.patternLength = patternLength || 8;
-
-    // Initialize pattern with default values
-    this.pattern = [];
-    for (var i = 0; i < this.patternLength; i++) {
-        this.pattern.push(this.valueType.default);
-    }
-
-    // State
-    this.currentStep = -1;
-    this.lastState = null;
-
-    // Default value for this sequencer (used by isActive)
-    // Mute defaults to 1 (unmuted), pitch defaults to 0 (no shift)
-    this.defaultValue = this.valueType.default;
-
-    // Timing
-    this.division = [1, 0, 0]; // Default 1 bar per step
-    this.ticksPerStep = 1920;
-
-    // Cache
-    this.cacheValid = false;
-
-    // Reference to device (set by SequencerDevice)
-    this.device = null;
-}
-
-/**
- * Set pattern with validation.
- * V6.0: Triggers lazy observer activation if pattern becomes active.
- * @param {Array} pattern - New pattern values
- */
-Sequencer.prototype.setPattern = function(pattern) {
-    var validated = [];
-    for (var i = 0; i < pattern.length; i++) {
-        var value = pattern[i];
-        if (this.valueType.validate(value)) {
-            validated.push(value);
-        } else {
-            validated.push(this.valueType.default);
-            debug("sequencer", "Invalid value " + value + " for " + this.name + ", using default");
-        }
-    }
-    this.pattern = validated;
-    this.patternLength = validated.length;
-
-    // V6.0: Check if we need to activate playback observers
-    if (this.device && this.device.checkAndActivateObservers) {
-        this.device.checkAndActivateObservers();
-    }
-};
-
-/**
- * Set individual step value.
- * V6.0: Triggers lazy observer activation if pattern becomes active.
- * @param {number} index - Step index
- * @param {*} value - Step value
- */
-Sequencer.prototype.setStep = function(index, value) {
-    if (index >= 0 && index < this.pattern.length) {
-        if (this.valueType.validate(value)) {
-            this.pattern[index] = value;
-
-            // V6.0: Check if we need to activate playback observers
-            if (this.device && this.device.checkAndActivateObservers) {
-                this.device.checkAndActivateObservers();
-            }
-        } else {
-            debug("sequencer", "Invalid value " + value + " for step " + index);
-        }
-    }
-};
-
-/**
- * Set pattern length, preserving existing values.
- * @param {number} length - New pattern length (1-64)
- */
-Sequencer.prototype.setLength = function(length) {
-    var newLength = Math.max(MIN_PATTERN_LENGTH, Math.min(MAX_PATTERN_LENGTH, length));
-
-    // Preserve existing values, fill new slots with defaults
-    while (this.pattern.length < newLength) {
-        this.pattern.push(this.valueType.default);
-    }
-
-    // Truncate if needed
-    if (this.pattern.length > newLength) {
-        this.pattern = this.pattern.slice(0, newLength);
-    }
-
-    this.patternLength = newLength;
-
-    // Reset step if out of bounds
-    if (this.currentStep >= newLength) {
-        this.currentStep = 0;
-    }
-};
-
-/**
- * Set division timing.
- * @param {Array|string} division - Division in [bars, beats, ticks] or legacy string format
- * @param {number} timeSignature - Time signature numerator (for tick calculation)
- */
-Sequencer.prototype.setDivision = function(division, timeSignature) {
-    this.division = division;
-    this.ticksPerStep = calculateTicksPerStep(division, timeSignature);
-};
-
-/**
- * Calculate current step based on tick position.
- * @param {number} ticks - Absolute tick position
- * @returns {number} - Current step number
- */
-Sequencer.prototype.calculateStep = function(ticks) {
-    return Math.floor(ticks / this.ticksPerStep) % this.patternLength;
-};
-
-/**
- * Get current pattern value.
- * @returns {*} - Value at current step
- */
-Sequencer.prototype.getCurrentValue = function() {
-    if (this.currentStep >= 0 && this.currentStep < this.pattern.length) {
-        return this.pattern[this.currentStep];
-    }
-    return this.valueType.default;
-};
-
-/**
- * Reset sequencer to initial state.
- */
-Sequencer.prototype.reset = function() {
-    this.currentStep = -1;
-    this.lastState = null;
-};
-
-/**
- * Check if sequencer is active (has non-default pattern values).
- * Replaces explicit 'enabled' flag with pattern-derived state.
- * - Mute: active if any step is 0 (muted)
- * - Pitch: active if any step is 1 (shifted)
- * @returns {boolean} - True if sequencer has active pattern
- */
-Sequencer.prototype.isActive = function() {
-    for (var i = 0; i < this.patternLength; i++) {
-        if (this.pattern[i] !== this.defaultValue) {
-            return true;
-        }
-    }
-    return false;
-};
-
-/**
- * Invalidate cache.
- */
-Sequencer.prototype.invalidateCache = function() {
-    this.cacheValid = false;
-};
-
-// ===== COMMAND REGISTRY =====
-
-/**
- * CommandRegistry - Maps message types to handler functions.
- * Replaces large switch statements with cleaner dispatch pattern.
- */
-function CommandRegistry() {
-    this.commands = {};
-}
-
-/**
- * Register a command handler.
- * @param {string} command - Command name
- * @param {Function} handler - Handler function
- */
-CommandRegistry.prototype.register = function(command, handler) {
-    this.commands[command] = handler;
-};
-
-/**
- * Execute a command.
- * @param {string} command - Command name
- * @param {Array} args - Command arguments
- * @param {Object} context - Context object (usually 'this')
- * @returns {boolean} - True if command was handled
- */
-CommandRegistry.prototype.execute = function(command, args, context) {
-    if (this.commands[command]) {
-        this.commands[command].call(context, args);
-        return true;
-    }
-    return false;
-};
+// ===== MODULE IMPORTS =====
+var constants = require('permute-constants');
+var TICKS_PER_QUARTER_NOTE = constants.TICKS_PER_QUARTER_NOTE;
+var MIDI_MIN = constants.MIDI_MIN;
+var MIDI_MAX = constants.MIDI_MAX;
+var OCTAVE_SEMITONES = constants.OCTAVE_SEMITONES;
+var DEFAULT_TIME_SIGNATURE = constants.DEFAULT_TIME_SIGNATURE;
+var MAX_PATTERN_LENGTH = constants.MAX_PATTERN_LENGTH;
+var MIN_PATTERN_LENGTH = constants.MIN_PATTERN_LENGTH;
+var DEFAULT_GAIN_VALUE = constants.DEFAULT_GAIN_VALUE;
+var MUTED_GAIN = constants.MUTED_GAIN;
+var DEFAULT_DRUM_RACK_TRANSPOSE = constants.DEFAULT_DRUM_RACK_TRANSPOSE;
+var INVALID_LIVE_API_ID = constants.INVALID_LIVE_API_ID;
+var TASK_SCHEDULE_DELAY = constants.TASK_SCHEDULE_DELAY;
+
+var utils = require('permute-utils');
+var debug = utils.debug;
+var handleError = utils.handleError;
+var parseNotesResponse = utils.parseNotesResponse;
+var findTransposeParameterByName = utils.findTransposeParameterByName;
+var createObserver = utils.createObserver;
+var defer = utils.defer;
+
+var Sequencer = require('permute-sequencer').Sequencer;
+var ObserverRegistry = require('permute-observer-registry').ObserverRegistry;
+var stateClasses = require('permute-state');
+var TrackState = stateClasses.TrackState;
+var ClipState = stateClasses.ClipState;
+var TransportState = stateClasses.TransportState;
+var instruments = require('permute-instruments');
+var InstrumentDetector = instruments.InstrumentDetector;
+var TransposeStrategy = instruments.TransposeStrategy;
+var DefaultInstrumentStrategy = instruments.DefaultInstrumentStrategy;
+var CommandRegistry = require('permute-commands').CommandRegistry;
+var temperature = require('permute-temperature');
 
 // ===== MAIN SEQUENCER DEVICE =====
 
@@ -1045,6 +103,9 @@ function SequencerDevice() {
     // V6.0: Lazy observer activation flag
     // Transport and time signature observers only created when a sequencer becomes active
     this.playbackObserversActive = false;
+
+    // Initialization lifecycle flag - prevents pattr_state output during init/restore window
+    this.initialized = false;
 
     // Time signature tracking
     this.timeSignatureNumerator = 4; // Default to 4/4
@@ -1281,6 +342,7 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
  * Establishes track reference, detects track/instrument types, and sets up observers.
  */
 SequencerDevice.prototype.init = function() {
+    post('[INIT-SEQUENCE] init() called at ' + Date.now() + '\n');
     debug("init", "Starting sequencer initialization");
     try {
         // Cache Live API device ID for OSC command filtering
@@ -1332,6 +394,8 @@ SequencerDevice.prototype.init = function() {
 
             // Send initial state broadcast with 'init' origin
             this.broadcastState('init');
+
+            this.initialized = true;
         } else {
             handleError("init", "Could not find track reference", true);
         }
@@ -1527,7 +591,7 @@ SequencerDevice.prototype.onTransportStop = function() {
             if (this.sequencers.hasOwnProperty(name)) {
                 var seq = this.sequencers[name];
                 seq.currentStep = -1;
-                seq.lastAppliedValue = undefined;
+                seq.lastParameterValue = undefined;
                 var cleanName = name.replace('Sequencer', '');
                 this.sendSequencerFeedback(cleanName);
             }
@@ -1618,7 +682,7 @@ SequencerDevice.prototype.onTransportStop = function() {
         if (this.sequencers.hasOwnProperty(name)) {
             var seq = this.sequencers[name];
             seq.currentStep = -1;
-            seq.lastAppliedValue = undefined;  // V4.1: Reset for next transport start
+            seq.lastParameterValue = undefined;  // V4.1: Reset for next transport start
 
             // Send updated feedback
             var cleanName = name.replace('Sequencer', '');
@@ -1840,310 +904,8 @@ SequencerDevice.prototype.executeBatchAudio = function(clip, clipId, pending) {
     }
 };
 
-// ===== V3.0 TEMPERATURE TRANSFORMATION =====
-
-/**
- * Setup temperature loop_jump observer.
- * Regenerates swap pattern on each loop.
- *
- * @param {LiveAPI} clip - Clip to observe
- */
-SequencerDevice.prototype.setupTemperatureLoopJumpObserver = function() {
-    this.clearTemperatureLoopJumpObserver();
-
-    var clip = this.getCurrentClip();
-    if (!clip) return;
-
-    var self = this;
-
-    this.temperatureLoopJumpObserver = createObserver(
-        clip.path,
-        "loop_jump",
-        function(args) {
-            defer(function() {
-                self.onTemperatureLoopJump();
-            });
-        }
-    );
-
-    this.observerRegistry.register('temperature_loop_jump', this.temperatureLoopJumpObserver);
-};
-
-/**
- * Clear temperature loop_jump observer.
- */
-SequencerDevice.prototype.clearTemperatureLoopJumpObserver = function() {
-    this.observerRegistry.unregister('temperature_loop_jump');
-    this.temperatureLoopJumpObserver = null;
-};
-
-/**
- * Set temperature value with state transitions.
- * V4.2: Extracted from temperature() function for use by OSC command handlers.
- *
- * @param {number} value - Temperature value (0.0-1.0)
- */
-SequencerDevice.prototype.setTemperatureValue = function(value) {
-    var newTemperatureValue = Math.max(0.0, Math.min(1.0, parseFloat(value)));
-
-    // Detect transition type
-    var wasActive = this.temperatureValue > 0;
-    var willBeActive = newTemperatureValue > 0;
-
-    // Get current clip for state operations
-    var clip = this.getCurrentClip();
-    var clipId = clip ? clip.id : null;
-
-    // Handle state transitions
-    if (!wasActive && willBeActive) {
-        // Transition: 0 -> >0 (enable)
-        if (clipId) {
-            this.captureTemperatureState(clipId);
-        }
-        debug("temperature", "Enabled: captured original state");
-    } else if (wasActive && !willBeActive) {
-        // Transition: >0 -> 0 (disable)
-        if (clipId) {
-            this.restoreTemperatureState(clipId);
-        }
-        debug("temperature", "Disabled: restored original state");
-    }
-
-    // Update temperature value
-    this.temperatureValue = newTemperatureValue;
-    this.temperatureActive = willBeActive;
-
-    // Setup or clear loop jump observer
-    if (willBeActive) {
-        this.setupTemperatureLoopJumpObserver();
-    } else {
-        this.clearTemperatureLoopJumpObserver();
-    }
-
-    debug("temperature", "Set temperature to " + newTemperatureValue);
-};
-
-/**
- * Capture original pitches by note ID for temperature transformation.
- * Called when temperature transitions from 0 to >0.
- *
- * V3.1: Uses Live API note_id for robust tracking that handles:
- * - Overdubbing (new notes simply won't exist in map)
- * - Note deletion (missing IDs gracefully skipped)
- * - Pitch sequencer interaction (accounts for current pitch state)
- *
- * @param {string} clipId - Clip ID to capture state for
- */
-SequencerDevice.prototype.captureTemperatureState = function(clipId) {
-    var clip = this.getCurrentClip();
-    if (!clip || clip.id !== clipId) {
-        debug("captureTemperatureState", "Clip unavailable or ID mismatch");
-        return;
-    }
-
-    // Read current notes with note IDs
-    var notesJson = clip.call("get_all_notes_extended");
-    var notes = parseNotesResponse(notesJson);
-    if (!notes || !notes.notes || notes.notes.length === 0) {
-        debug("captureTemperatureState", "No notes to capture");
-        return;
-    }
-
-    // Determine if pitch sequencer is currently shifting notes up
-    var pitchWasOn = false;
-    if (this.lastValues[clipId] && this.lastValues[clipId].pitch === 1) {
-        pitchWasOn = true;
-    }
-
-    // Calculate offset to get TRUE base pitch (before pitch sequencer shift)
-    // If pitch is on, notes are currently shifted +12, so subtract to get base
-    var pitchOffset = 0;
-    if (pitchWasOn) {
-        // V4.0: Check if using note-based transpose
-        // If using parameter-based, notes aren't shifted - the device parameter is
-        if (this.instrumentType !== 'parameter_transpose') {
-            pitchOffset = -OCTAVE_SEMITONES;
-        }
-    }
-
-    // Build originalPitches map: noteId -> base pitch
-    var originalPitches = {};
-    for (var i = 0; i < notes.notes.length; i++) {
-        var note = notes.notes[i];
-        // Store the TRUE base pitch (accounting for any pitch sequencer shift)
-        originalPitches[note.note_id] = note.pitch + pitchOffset;
-    }
-
-    // Store state
-    this.temperatureState[clipId] = {
-        originalPitches: originalPitches,
-        capturedWithPitchOn: pitchWasOn
-    };
-
-    debug("captureTemperatureState", "Captured " + notes.notes.length + " notes for clip " + clipId, {
-        pitchWasOn: pitchWasOn,
-        sampleNoteIds: Object.keys(originalPitches).slice(0, 3)
-    });
-};
-
-/**
- * Restore original pitches from note ID map.
- * Called when temperature transitions from >0 to 0.
- *
- * V3.1: Restores each note to its original pitch by note ID.
- * - Notes that were overdubbed (not in map) keep their current pitch
- * - Accounts for current pitch sequencer state when restoring
- *
- * @param {string} clipId - Clip ID to restore state for
- */
-SequencerDevice.prototype.restoreTemperatureState = function(clipId) {
-    var state = this.temperatureState[clipId];
-    if (!state) {
-        debug("restoreTemperatureState", "No state to restore for clip " + clipId);
-        return;
-    }
-
-    var clip = this.getCurrentClip();
-    if (!clip || clip.id !== clipId) {
-        debug("restoreTemperatureState", "Clip unavailable or ID mismatch");
-        delete this.temperatureState[clipId];
-        return;
-    }
-
-    // Read current notes
-    var notesJson = clip.call("get_all_notes_extended");
-    var notes = parseNotesResponse(notesJson);
-    if (!notes || !notes.notes) {
-        debug("restoreTemperatureState", "No notes to restore");
-        delete this.temperatureState[clipId];
-        return;
-    }
-
-    // Determine current pitch sequencer state for adjustment
-    var currentPitchOn = false;
-    if (this.lastValues[clipId] && this.lastValues[clipId].pitch === 1) {
-        currentPitchOn = true;
-    }
-
-    // Calculate pitch adjustment based on current pitch sequencer state
-    // If pitch is currently on, we need to add the shift to the base pitch
-    var pitchAdjustment = 0;
-    if (currentPitchOn) {
-        // V4.0: Check if using note-based transpose
-        // If using parameter-based, don't adjust notes - device handles it
-        if (this.instrumentType !== 'parameter_transpose') {
-            pitchAdjustment = OCTAVE_SEMITONES;
-        }
-    }
-
-    // Restore each note's pitch from the map
-    var changed = false;
-    var restoredCount = 0;
-    var skippedCount = 0;
-
-    for (var i = 0; i < notes.notes.length; i++) {
-        var note = notes.notes[i];
-        var originalPitch = state.originalPitches[note.note_id];
-
-        if (originalPitch !== undefined) {
-            // Known note - restore to original base pitch + current pitch adjustment
-            note.pitch = originalPitch + pitchAdjustment;
-            changed = true;
-            restoredCount++;
-        } else {
-            // New note from overdub - keep current pitch
-            skippedCount++;
-        }
-    }
-
-    // Apply modifications if any changes were made
-    if (changed) {
-        try {
-            clip.call("apply_note_modifications", notes);
-            debug("restoreTemperatureState", "Restored " + restoredCount + " notes, skipped " + skippedCount + " (overdubs)");
-        } catch (error) {
-            handleError("restoreTemperatureState", error, false);
-        }
-    }
-
-    // Clear state
-    delete this.temperatureState[clipId];
-};
-
-/**
- * Handle temperature loop jump.
- * V3.1: Restores to original pitches first, then applies fresh random shuffle.
- *
- * This ensures temperature value directly controls "distance from original":
- * - temp = 0.1 → few swaps from original each loop
- * - temp = 0.9 → many swaps from original each loop
- *
- * Each loop is random but always based on the original pitches,
- * not cumulative scrambling on top of previous scrambles.
- */
-SequencerDevice.prototype.onTemperatureLoopJump = function() {
-    if (!this.temperatureActive || this.temperatureValue <= 0) return;
-
-    var clip = this.getCurrentClip();
-    if (!clip) return;
-
-    var clipId = clip.id;
-    var state = this.temperatureState[clipId];
-
-    // Need temperature state to know original pitches
-    if (!state) {
-        debug("onTemperatureLoopJump", "No temperature state for clip " + clipId);
-        return;
-    }
-
-    // 1. Read current notes
-    var notesJson = clip.call("get_all_notes_extended");
-    var notes = parseNotesResponse(notesJson);
-    if (!notes || !notes.notes) return;
-
-    // 2. Calculate pitch adjustment for current pitch sequencer state
-    var currentPitchOn = false;
-    if (this.lastValues[clipId] && this.lastValues[clipId].pitch === 1) {
-        currentPitchOn = true;
-    }
-    var pitchAdjustment = 0;
-    if (currentPitchOn) {
-        // V4.0: Check if using note-based transpose
-        if (this.instrumentType !== 'parameter_transpose') {
-            pitchAdjustment = OCTAVE_SEMITONES;
-        }
-    }
-
-    // 3. Restore all notes to original pitches first
-    for (var i = 0; i < notes.notes.length; i++) {
-        var note = notes.notes[i];
-        var originalPitch = state.originalPitches[note.note_id];
-        if (originalPitch !== undefined) {
-            // Restore to original + current pitch sequencer adjustment
-            note.pitch = originalPitch + pitchAdjustment;
-        }
-        // Overdubbed notes (not in map) keep their current pitch
-    }
-
-    // 4. Generate NEW random swap pattern based on temperature
-    this.temperatureSwapPattern = generateSwapPattern(
-        notes.notes,
-        this.temperatureValue
-    );
-
-    debug("temperature", "Generated " + this.temperatureSwapPattern.length + " swap groups from original");
-
-    // 5. Apply swaps to the restored original pitches
-    applySwapPattern(notes.notes, this.temperatureSwapPattern);
-
-    // 6. Apply to clip
-    try {
-        clip.call("apply_note_modifications", notes);
-        debug("temperature", "Applied temperature transformation from original");
-    } catch (error) {
-        handleError("onTemperatureLoopJump", error, false);
-    }
-};
+// Apply temperature methods mixin to SequencerDevice prototype
+temperature.applyTemperatureMethods(SequencerDevice.prototype);
 
 // ===== V4.0 INSTRUMENT DETECTION =====
 
@@ -2343,9 +1105,9 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, ticks) {
         if (seqName === 'pitch' && this.instrumentType === 'parameter_transpose') {
             var shouldShiftUp = (value === 1);
             // Only apply if value changed from last applied
-            if (value !== seq.lastAppliedValue) {
+            if (value !== seq.lastParameterValue) {
                 this.instrumentStrategy.applyTranspose(shouldShiftUp);
-                seq.lastAppliedValue = value;
+                seq.lastParameterValue = value;
             }
             this.sendSequencerFeedback(seqName);
             return;
@@ -2509,7 +1271,7 @@ SequencerDevice.prototype.broadcastState = function(origin) {
     // We want: ["pattr_state", trackIndex, data...] (skip origin at index 2)
     // Skip for position updates - they happen constantly during playback and don't need persistence
     // Skip for pattr_restore - we just loaded from pattr, no need to save back (prevents feedback loop)
-    if (origin !== 'position' && origin !== 'pattr_restore') {
+    if (this.initialized && origin !== 'position' && origin !== 'pattr_restore' && origin !== 'init') {
         var pattrArgs = ["pattr_state", args[1]].concat(args.slice(3));
         outlet.apply(null, [0].concat(pattrArgs));
     }
@@ -2851,49 +1613,42 @@ function setState(stateJson) {
  */
 function restoreState() {
     var args = arrayfromargs(arguments);
-    post('[RESTORE] restoreState called with ' + args.length + ' args\n');
+    post('[INIT-SEQUENCE] restoreState() called at ' + Date.now() + ' with ' + args.length + ' args\n');
 
     if (args.length < 28) {
         post('[RESTORE] Not enough args (expected 28, got ' + args.length + '), skipping\n');
         return;
     }
 
+    // Parse flat 28-arg format into JSON state object and delegate to setState()
     var idx = 1;  // Skip trackIndex (arg 0)
 
-    // Mute pattern (8 steps)
-    for (var i = 0; i < 8; i++) {
-        sequencer.sequencers.muteSequencer.pattern[i] = parseInt(args[idx++]);
-    }
+    var mutePattern = [];
+    for (var i = 0; i < 8; i++) mutePattern.push(parseInt(args[idx++]));
+    var muteLength = parseInt(args[idx++]);
+    var muteDivision = [parseInt(args[idx++]), parseInt(args[idx++]), parseInt(args[idx++])];
+    idx++; // skip mute position (runtime state)
 
-    // Mute length and division
-    sequencer.sequencers.muteSequencer.patternLength = parseInt(args[idx++]);
-    var muteBars = parseInt(args[idx++]);
-    var muteBeats = parseInt(args[idx++]);
-    var muteTicks = parseInt(args[idx++]);
-    sequencer.sequencers.muteSequencer.division = [muteBars, muteBeats, muteTicks];
+    var pitchPattern = [];
+    for (var i = 0; i < 8; i++) pitchPattern.push(parseInt(args[idx++]));
+    var pitchLength = parseInt(args[idx++]);
+    var pitchDivision = [parseInt(args[idx++]), parseInt(args[idx++]), parseInt(args[idx++])];
+    idx++; // skip pitch position (runtime state)
 
-    // Skip mute position (runtime state, not saved)
-    idx += 1;
+    var temp = parseFloat(args[idx++]);
 
-    // Pitch pattern (8 steps)
-    for (var i = 0; i < 8; i++) {
-        sequencer.sequencers.pitchSequencer.pattern[i] = parseInt(args[idx++]);
-    }
+    // Delegate to setState() which uses proper setters (setPattern, setLength, setDivision, setTemperatureValue)
+    sequencer.setState({
+        version: '3.1',
+        sequencers: {
+            mute: { pattern: mutePattern, patternLength: muteLength, division: muteDivision },
+            pitch: { pattern: pitchPattern, patternLength: pitchLength, division: pitchDivision }
+        },
+        temperature: temp
+    });
 
-    // Pitch length and division
-    sequencer.sequencers.pitchSequencer.patternLength = parseInt(args[idx++]);
-    var pitchBars = parseInt(args[idx++]);
-    var pitchBeats = parseInt(args[idx++]);
-    var pitchTicks = parseInt(args[idx++]);
-    sequencer.sequencers.pitchSequencer.division = [pitchBars, pitchBeats, pitchTicks];
-
-    // Skip pitch position (runtime state, not saved)
-    idx += 1;
-
-    // Temperature
-    sequencer.temperatureValue = parseFloat(args[idx++]);
-
-    post('[RESTORE] State restored, broadcasting...\n');
+    sequencer.initialized = true;
+    post('[RESTORE] State restored via setState(), broadcasting...\n');
     sequencer.broadcastState('pattr_restore');
 }
 
@@ -2953,22 +1708,9 @@ function loadbang() {
  * Returns sequencer state as JSON string.
  */
 function getvalueof() {
-    // Debug: check if sequencer and its sequencers exist
-    post('[STATE] getvalueof called\n');
-    post('[STATE] sequencer exists: ' + (sequencer ? 'yes' : 'no') + '\n');
-    post('[STATE] sequencer.sequencers exists: ' + (sequencer && sequencer.sequencers ? 'yes' : 'no') + '\n');
-    post('[STATE] muteSequencer exists: ' + (sequencer && sequencer.sequencers && sequencer.sequencers.muteSequencer ? 'yes' : 'no') + '\n');
-
-    // Direct read from the sequencer object
-    if (sequencer && sequencer.sequencers && sequencer.sequencers.muteSequencer) {
-        post('[STATE] DIRECT muteSequencer.pattern: ' + sequencer.sequencers.muteSequencer.pattern.join(',') + '\n');
-    }
-
     var state = sequencer.getState();
     var json = JSON.stringify(state);
-    post('[STATE] getState() returned mute pattern: ' + state.sequencers.mute.pattern.join(',') + '\n');
-    post('[STATE] version: ' + state.version + ', temperature: ' + state.temperature + '\n');
-    post('[STATE] pitch pattern: ' + state.sequencers.pitch.pattern.join(',') + '\n');
+    debug("getvalueof", "Saving state", { version: state.version, temperature: state.temperature });
     return json;
 }
 
@@ -2977,36 +1719,23 @@ function getvalueof() {
  * Restores sequencer state from JSON string.
  */
 function setvalueof(v) {
-    post('[STATE] setvalueof called with type: ' + typeof v + '\n');
-    if (v) {
-        post('[STATE] value: ' + (typeof v === 'string' ? v.substring(0, 100) : JSON.stringify(v).substring(0, 100)) + '...\n');
-    }
-
+    post('[INIT-SEQUENCE] setvalueof() called at ' + Date.now() + '\n');
     if (v && typeof v === 'string') {
         try {
             var state = JSON.parse(v);
-            post('[STATE] Parsed state version: ' + state.version + '\n');
-            post('[STATE] mute pattern: ' + (state.sequencers && state.sequencers.mute ? state.sequencers.mute.pattern.join(',') : 'N/A') + '\n');
+            debug("setvalueof", "Restoring state", { version: state.version });
             sequencer.setState(state);
-            post('[STATE] setState complete, broadcasting...\n');
-            // Broadcast restored state to UI
+            sequencer.initialized = true;
             sequencer.broadcastState('pattr_restore');
-            post('[STATE] Restore complete\n');
         } catch (e) {
-            post('[STATE] Error restoring state: ' + e + '\n');
+            handleError("setvalueof", e, true);
         }
-    } else {
-        post('[STATE] Skipping - invalid value type or empty\n');
     }
 }
 
 // Handle notifydeleted
 function notifydeleted() {
-    // Use observer registry for cleanup
+    // Use observer registry for cleanup (includes temperature_loop_jump)
     sequencer.observerRegistry.clearAll();
-
-    // Clear temperature loop_jump observer
-    if (sequencer.transformations && sequencer.transformations.temperature) {
-        sequencer.transformations.temperature.clearLoopJumpObserver();
-    }
+    sequencer.temperatureLoopJumpObserver = null;
 }

@@ -10,7 +10,16 @@ Permute is a Max4Live device that provides mute sequencing, pitch sequencing, an
 
 | File | Purpose |
 |------|---------|
-| `permute-device.js` | Core JavaScript (~3000 lines) - all sequencer logic |
+| `permute-device.js` | Main device controller (~1740 lines) - init, transport, batching, state |
+| `permute-constants.js` | Constants, config, value types |
+| `permute-utils.js` | Debug, error handling, observer creation, tick calculation |
+| `permute-sequencer.js` | `Sequencer` class (pattern, timing, step progression) |
+| `permute-observer-registry.js` | `ObserverRegistry` class |
+| `permute-state.js` | `TrackState`, `ClipState`, `TransportState` |
+| `permute-instruments.js` | `InstrumentDetector`, transpose strategy classes |
+| `permute-commands.js` | `CommandRegistry` class |
+| `permute-shuffle.js` | Pure shuffle/swap functions for temperature |
+| `permute-temperature.js` | Temperature mixin (capture/restore/loop jump) |
 | `Permute.amxd` | Max4Live device file (load this in Ableton) |
 | `Permute.maxpat` | Max patch (UI and routing) |
 | `README.md` | User-facing documentation |

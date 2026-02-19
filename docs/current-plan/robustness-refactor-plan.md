@@ -426,3 +426,50 @@ permute-state.js              (no deps)
 - `docs/current-plan/io-pathway-refactor-plan.md` (blocked by this fix)
 - Issue #3: Separate input/output pathways
 - Issue #4: State not restoring properly
+
+---
+
+## Implementation Log
+
+### 2026-02-13: Full implementation (Phases 1-4)
+
+**Phase 1: Fix State Persistence Bug & Consolidate Restoration Path**
+
+- [x] **1a** Rewrote `restoreState()` as thin adapter that parses flat 28-arg format into JSON and delegates to `setState()`. No more direct property writes — all changes go through proper setters (`setPattern()`, `setLength()`, `setDivision()`, `setTemperatureValue()`).
+- [x] **1b** Kept `restoreState()` as adapter (full removal deferred to IO pathway refactor).
+- [x] **1c** Added `origin !== 'init'` to pattr_state output guard in `broadcastState()`.
+- [x] **1d** Reduced `getvalueof()` from 12 lines of investigation logging to single-line debug summary. Reduced `setvalueof()` similarly. Error logging preserved.
+
+**Phase 2: Add Initialization Lifecycle Management**
+
+- [x] **2a** Added `this.initialized = false` to `SequencerDevice` constructor.
+- [x] **2b** Guarded pattr_state output with `this.initialized &&` in `broadcastState()`.
+- [x] **2c** Set `initialized = true` at end of `init()` (after `broadcastState('init')`).
+- [x] **2d** Set `initialized = true` in both `restoreState()` and `setvalueof()` — ensures flag is set regardless of which restoration path runs.
+- [x] **2e** Added `[INIT-SEQUENCE]` logging with timestamps to `init()`, `restoreState()`, and `setvalueof()` for empirical startup order documentation.
+
+**Phase 3: Modularize into Focused Files**
+
+- [x] **3.1** Created `permute-constants.js` — constants, config, VALUE_TYPES (83 lines)
+- [x] **3.2** Created `permute-utils.js` — debug, error handling, observer creation, tick calculation, transpose parameter scanning (255 lines)
+- [x] **3.3** Created `permute-sequencer.js` — Sequencer class; renamed `lastAppliedValue` → `lastParameterValue` with explanatory comment (197 lines)
+- [x] **3.4** Created `permute-observer-registry.js` — ObserverRegistry class (61 lines)
+- [x] **3.5** Created `permute-state.js` — TrackState, ClipState, TransportState (95 lines)
+- [x] **3.6** Created `permute-instruments.js` — InstrumentDetector, InstrumentStrategy, TransposeStrategy, DefaultInstrumentStrategy (176 lines)
+- [x] **3.7** Created `permute-commands.js` — CommandRegistry class (41 lines)
+- [x] **3.8** Created `permute-shuffle.js` — fisherYatesShuffle, generateSwapPattern, applySwapPattern (174 lines)
+- [x] **3.9** Created `permute-temperature.js` — temperature mixin with `_getCurrentPitchOffset()` helper consolidating 3 duplicated pitch offset calculations (321 lines)
+- [x] **3.10** Updated `permute-device.js` — added require() imports, removed extracted code, applied temperature mixin, renamed `lastAppliedValue` references. Fixed stale `notifydeleted()` reference to removed `transformations.temperature`. Main file reduced from ~3013 to ~1741 lines.
+- [x] **3.11** Verified structure: mixin applied before instance creation, all references resolve, no orphaned function calls.
+
+**Phase 4: Documentation**
+
+- [x] **4.1** Created `docs/adr/003-robust-state-restoration.md` documenting Phases 1-2.
+- [x] **4.2** Created `docs/adr/004-modularization.md` documenting Phase 3.
+- [x] **4.3** Updated `CLAUDE.md` key files table with all new module files.
+- [x] **4.4** Checked `docs/api.md` — no broadcast format changes, no update needed.
+
+**Notable deviations from plan:**
+
+- Main file is ~1741 lines vs projected ~1200. The `setupCommandHandlers()` method (~200 lines) and batch system (~150 lines) are larger than the plan's line estimates suggested. The total codebase is ~3144 lines vs original ~3013, reflecting module overhead (require/exports boilerplate).
+- Fixed a pre-existing bug in `notifydeleted()` which referenced `sequencer.transformations.temperature.clearLoopJumpObserver()` — a path that no longer existed. Replaced with direct observer registry cleanup.

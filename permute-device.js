@@ -51,7 +51,13 @@ var TRANSPOSE_CONFIG = {
         { name: "transpose", shiftAmount: 16 },
         { name: "octave", shiftAmount: 16 }
     ],
-    defaultShiftAmount: 12
+    defaultShiftAmount: 12,
+    // Instruments that should always use note-based transposition,
+    // even when a named pitch parameter is detected.
+    // Matched against the Live API class_name property (stable internal name).
+    noteTransposeDevices: [
+        "Operator"
+    ]
 };
 
 // ===== CONSTANTS =====
@@ -266,6 +272,37 @@ function findTransposeParameterByName(device) {
         handleError("findTransposeParameterByName", error, false);
         return null;
     }
+}
+
+/**
+ * Check if a device should always use note-based transposition,
+ * regardless of whether a named pitch parameter is found.
+ * Uses the Live API class_name (stable internal name, not user-visible name).
+ *
+ * Add instrument class names to TRANSPOSE_CONFIG.noteTransposeDevices to
+ * force note-based transposition for specific instruments.
+ *
+ * @param {LiveAPI} device - Device to check
+ * @returns {boolean}
+ */
+function isNoteTransposeDevice(device) {
+    if (!device || device.id === INVALID_LIVE_API_ID) return false;
+    var list = TRANSPOSE_CONFIG.noteTransposeDevices;
+    if (!list || list.length === 0) return false;
+    try {
+        var classNameResult = device.get("class_name");
+        if (!classNameResult || !classNameResult[0]) return false;
+        var className = classNameResult[0];
+        for (var i = 0; i < list.length; i++) {
+            if (list[i] === className) {
+                debug("instrument", "Device class '" + className + "' matched noteTransposeDevices list");
+                return true;
+            }
+        }
+    } catch (error) {
+        handleError("isNoteTransposeDevice", error, false);
+    }
+    return false;
 }
 
 /**
@@ -2170,6 +2207,14 @@ SequencerDevice.prototype.detectInstrumentType = function() {
 
     this.instrumentDevice = result.device;
     this.instrumentDeviceId = result.deviceId;
+
+    // Check config-driven exception list first: some instruments (e.g. Operator)
+    // should always use note-based transposition regardless of named params.
+    if (isNoteTransposeDevice(result.device)) {
+        this.instrumentType = 'note_transpose';
+        debug("instrument", "Device in noteTransposeDevices list, using note-based shifting");
+        return;
+    }
 
     // Scan for transpose parameter by name
     var transposeResult = findTransposeParameterByName(result.device);

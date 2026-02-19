@@ -286,7 +286,8 @@ function findTransposeParameterByName(device) {
 function isParameterTransposeDevice(device) {
     if (!device || device.id === INVALID_LIVE_API_ID) return false;
     try {
-        var className = device.get("class_name");
+        var classNameResult = device.get("class_name");
+        var className = classNameResult && classNameResult[0] ? classNameResult[0] : classNameResult;
         var list = TRANSPOSE_CONFIG.parameterTransposeDevices;
         for (var i = 0; i < list.length; i++) {
             if (list[i] === className) return true;
@@ -2200,6 +2201,10 @@ SequencerDevice.prototype.detectInstrumentType = function() {
 
     this.instrumentDevice = result.device;
     this.instrumentDeviceId = result.deviceId;
+
+    var classNameResult = result.device.get("class_name");
+    var detectedClassName = classNameResult && classNameResult[0] ? classNameResult[0] : String(classNameResult);
+    debug("instrument", "Detected device class_name: '" + detectedClassName + "'");
 
     // Default is note_transpose. Only devices in parameterTransposeDevices are
     // candidates for parameter-based transposition (with fallback to note_transpose

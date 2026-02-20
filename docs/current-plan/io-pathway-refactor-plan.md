@@ -677,3 +677,133 @@ This format handling should be implemented in task 3.5 (`handleMaxUICommand()`).
 3. Convert to full 8-element pattern array
 4. Update sequencer state
 5. Broadcast to OSC and pattr (but NOT to UI)
+
+---
+
+## Progress Log
+
+### 2026-02-20: Phase 0.5 (JS) + Phase 1 Complete
+
+**What was done (all in `permute-device.js`):**
+
+1. **Phase 1.1 — Outlet definition** (line 14)
+   - Changed `outlets = 1` → `outlets = 3` (0: UI, 1: OSC, 2: pattr)
+
+2. **Phase 1.2-1.4 — Broadcast refactor**
+   - Extracted `buildStateData()` — shared data builder for OSC and pattr
+   - Created `broadcastToOSC(origin, stateData)` — sends `state_broadcast` via outlet 1
+   - Created `broadcastToPattr(stateData)` — sends `pattr_state` via outlet 2 (guarded by `initialized`)
+   - Refactored `broadcastState(origin)` to use the new functions as a routing wrapper
+
+3. **Phase 1.5 — Routing rules**
+   - `broadcastState()` routes based on origin:
+     - OSC (outlet 1): Always sent
+     - pattr (outlet 2): Skipped for `position`, `pattr_restore`, `init`
+   - Guards moved from inline conditionals to caller responsibility in `broadcastToPattr()`
+
+4. **Phase 1.7 — setState() optimization**
+   - Changed `setState()` to call `sendSequencerFeedbackLocal()` instead of `sendSequencerFeedback()`
+   - Eliminates 2 redundant `broadcastState('position')` calls during restore
+   - Restore now produces 1 broadcast instead of 3
+
+5. **Phase 0.5.5 — Temporary UI message handlers** (in `anything()`)
+   - Added handlers for: `mute_ui_steps`, `pitch_ui_steps`, `mute_ui_length`, `pitch_ui_length`, `mute_ui_division`, `pitch_ui_division`, `temperature_ui`, `temperature_reset_ui`, `temperature_shuffle_ui`
+   - These parse the new message formats and route to existing setters
+   - Broadcast to OSC + pattr only (skip UI — it already reflects the change)
+
+6. **Temperature broadcast fix**
+   - Added `broadcastState('temperature')` to `temperature()` and `temperature_reset()` globals
+   - These previously silently changed state without notifying OSC or pattr
+
+**What was NOT changed:**
+- No Max patch (.amxd) changes yet
+- Legacy `mute()`/`pitch()` globals retained (still wired from current patch)
+- `handleSequencerMessage()` retained (still called by legacy globals)
+- Outlet 0 still carries `state_broadcast` and `pattr_state` in addition to UI feedback (until Max patch is rewired)
+
+**Current state — clean break, requires Max patch update:**
+- `broadcastState()` sends OSC to outlet 1 and pattr to outlet 2 only. No legacy duplication to outlet 0.
+- Outlet 0 is now exclusively for UI feedback (`mute_step_0`, `mute_current`, etc.).
+- **The Max patch must be rewired (Phase 2) before this JS will work.** See instructions below.
+- The new `*_ui_*` handlers in `anything()` are additive — they coexist with the legacy `mute()`/`pitch()`/`temperature()` globals until the patch UI objects are rewired (Phase 0.5).
+
+---
+
+## Max Patch Instructions (Phase 0.5 + Phase 2)
+
+These changes must be made in Max's patcher editor. Open `Permute.amxd` in Max (via Ableton, click the wrench icon on the device).
+
+### Step 1: Verify v8 object now has 3 outlets
+
+After saving `permute-device.js`, the `v8 permute-device.js` object (obj-37) should show 3 outlets instead of 1. If not, delete and re-add the v8 object (or close and reopen the device).
+
+### Step 2: Rewire v8 outlet connections
+
+**Current wiring:**
+```
+v8 outlet 0 ──► [route mute_current pitch_current state_broadcast pattr_state] (obj-24)
+```
+
+**New wiring:**
+
+| v8 Outlet | Connect To | Purpose |
+|-----------|-----------|---------|
+| Outlet 0 (leftmost) | Keep existing connection to `[route]` obj-24 | UI feedback (mute_current, pitch_current, etc.) |
+| Outlet 1 (middle) | New: connect to `[prepend /looping/sequencer/state]` (obj-7) → `[udpsend]` (obj-26) | OSC state broadcasts |
+| Outlet 2 (rightmost) | New: connect to `[pattr seq_state]` (obj-5) | pattr persistence |
+
+**Detailed steps:**
+
+1. **Outlet 0 → obj-24**: This connection already exists. Leave it. But you can now remove the `state_broadcast` and `pattr_state` match words from the `[route]` object since those messages no longer come through outlet 0. Change it to:
+   ```
+   route mute_current pitch_current
+   ```
+   This simplifies the route and its remaining unmatched outlet still catches UI step feedback.
+
+2. **Outlet 1 → OSC chain**:
+   - The `state_broadcast` message comes pre-formatted from outlet 1
+   - Connect outlet 1 to a `[route state_broadcast]` object (or directly to the chain)
+   - Need to strip the `state_broadcast` selector and prepend the OSC address:
+     - v8 outlet 1 → `[route state_broadcast]` → `[prepend /looping/sequencer/state]` → `[udpsend 127.0.0.1 11003]` (obj-26)
+   - Also connect to the position gate chain if you want position OSC broadcasts:
+     - From the same route, extract position info for `mute_current`/`pitch_current` if needed, OR keep those on outlet 0
+
+3. **Outlet 2 → pattr**:
+   - Connect outlet 2 directly to `[pattr seq_state]` (obj-5)
+   - The `pattr_state` selector needs to be stripped first, so:
+     - v8 outlet 2 → `[route pattr_state]` → `[pattr seq_state]` (obj-5)
+   - Remove the old pattr connection from the outlet 0 `[route]` chain
+
+4. **Disconnect old pattr_state path**: Remove the connection from obj-24 outlet 3 → obj-5 (this was the old `pattr_state` route from outlet 0)
+
+5. **Disconnect old state_broadcast path**: Remove the connection from obj-24 outlet 2 → obj-7/obj-26 chain (old OSC broadcast from outlet 0)
+
+### Step 3: Wire UI objects with new message prefixes (Phase 0.5)
+
+These changes prepare the UI for inlet separation (Phase 3) but work now via `anything()`.
+
+**Mute step grid (obj-42 `live.grid[3]`):**
+- Current: grid → `[route row]` → ... → `[prepend mute step]` (obj-63) → `[s ---tojs]`
+- Change: Replace `[prepend mute step]` chain. Instead:
+  - grid row output → `[prepend mute_ui_steps]` → `[s ---tojs]`
+  - The grid sends active indices directly in the right format
+
+**Pitch step grid (obj-120 `live.grid[1]`):**
+- Same pattern: Replace `[prepend pitch step]` chain with `[prepend pitch_ui_steps]`
+
+**Mute length (obj-134 `live.numbox`):**
+- Current: numbox → `[prepend mute length]` (obj-59) → `[s ---tojs]`
+- Change: `[prepend mute_ui_length]` → `[s ---tojs]`
+
+**Temperature dial:**
+- If wired directly as `temperature <value>`, change to `[prepend temperature_ui]` → v8
+
+**Note:** The existing `mute()`/`pitch()`/`temperature()` globals still work if you don't rewire the UI yet. The new `*_ui_*` handlers are additive — they coexist with the legacy handlers.
+
+### Step 4: Test
+
+1. Save the patch
+2. Toggle mute/pitch steps — verify they still work
+3. Check Max console for errors
+4. Save Live Set, close, reopen — verify state restores
+5. If using OSC frontend, verify state broadcasts are received

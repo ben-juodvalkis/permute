@@ -51,7 +51,14 @@ var TRANSPOSE_CONFIG = {
         { name: "transpose", shiftAmount: 16 },
         { name: "octave", shiftAmount: 16 }
     ],
-    defaultShiftAmount: 12
+    defaultShiftAmount: 12,
+    // Devices that use parameter-based transposition (if a named param is found).
+    // All other instruments use note_transpose by default.
+    // Fallback to note_transpose if no named param is found even for listed devices.
+    parameterTransposeDevices: [
+        "DrumGroupDevice",
+        "InstrumentGroupDevice"
+    ]
 };
 
 // ===== CONSTANTS =====
@@ -265,6 +272,30 @@ function findTransposeParameterByName(device) {
     } catch (error) {
         handleError("findTransposeParameterByName", error, false);
         return null;
+    }
+}
+
+/**
+ * Check if a device should use parameter-based transposition.
+ * Only devices explicitly listed in TRANSPOSE_CONFIG.parameterTransposeDevices
+ * are candidates for parameter transpose; all others default to note_transpose.
+ *
+ * @param {LiveAPI} device - Device to check
+ * @returns {boolean}
+ */
+function isParameterTransposeDevice(device) {
+    if (!device || device.id === INVALID_LIVE_API_ID) return false;
+    try {
+        var classNameResult = device.get("class_name");
+        var className = classNameResult && classNameResult[0] ? classNameResult[0] : classNameResult;
+        var list = TRANSPOSE_CONFIG.parameterTransposeDevices;
+        for (var i = 0; i < list.length; i++) {
+            if (list[i] === className) return true;
+        }
+        return false;
+    } catch (error) {
+        handleError("isParameterTransposeDevice", error, false);
+        return false;
     }
 }
 
@@ -2171,22 +2202,33 @@ SequencerDevice.prototype.detectInstrumentType = function() {
     this.instrumentDevice = result.device;
     this.instrumentDeviceId = result.deviceId;
 
-    // Scan for transpose parameter by name
-    var transposeResult = findTransposeParameterByName(result.device);
-    if (transposeResult) {
-        this.instrumentType = 'parameter_transpose';
-        this.instrumentStrategy = new TransposeStrategy(
-            result.device,
-            transposeResult.param,
-            transposeResult.shiftAmount,
-            transposeResult.name
-        );
-        debug("instrument", "Found transpose param '" + transposeResult.name +
-              "' at index " + transposeResult.index +
-              " (shift: " + transposeResult.shiftAmount + ")");
+    var classNameResult = result.device.get("class_name");
+    var detectedClassName = classNameResult && classNameResult[0] ? classNameResult[0] : String(classNameResult);
+    debug("instrument", "Detected device class_name: '" + detectedClassName + "'");
+
+    // Default is note_transpose. Only devices in parameterTransposeDevices are
+    // candidates for parameter-based transposition (with fallback to note_transpose
+    // if no named param is found on those devices either).
+    if (isParameterTransposeDevice(result.device)) {
+        var transposeResult = findTransposeParameterByName(result.device);
+        if (transposeResult) {
+            this.instrumentType = 'parameter_transpose';
+            this.instrumentStrategy = new TransposeStrategy(
+                result.device,
+                transposeResult.param,
+                transposeResult.shiftAmount,
+                transposeResult.name
+            );
+            debug("instrument", "Found transpose param '" + transposeResult.name +
+                  "' at index " + transposeResult.index +
+                  " (shift: " + transposeResult.shiftAmount + ")");
+        } else {
+            this.instrumentType = 'note_transpose';
+            debug("instrument", "Listed device but no named param found, falling back to note-based shifting");
+        }
     } else {
         this.instrumentType = 'note_transpose';
-        debug("instrument", "No transpose param found, using note-based shifting");
+        debug("instrument", "Using note-based shifting (default)");
     }
 };
 

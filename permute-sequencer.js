@@ -148,6 +148,7 @@ Sequencer.prototype.setDivision = function(division, timeSignature) {
  * @returns {number} - Current step number
  */
 Sequencer.prototype.calculateStep = function(ticks) {
+    if (!this.ticksPerStep || this.ticksPerStep <= 0) return 0;
     return Math.floor(ticks / this.ticksPerStep) % this.patternLength;
 };
 

@@ -286,16 +286,16 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
         // args: [deviceId, mutePattern[8], muteLength, muteBars, muteBeats, muteTicks,
         //        pitchPattern[8], pitchLength, pitchBars, pitchBeats, pitchTicks, temperature]
         // Total: 26 args (1 + 8 + 1 + 3 + 8 + 1 + 3 + 1)
-        post('[set_state] Received ' + args.length + ' args, deviceId=' + args[0] + '\n');
+        debug("set_state", "Received " + args.length + " args, deviceId=" + args[0]);
         if (args.length < 24) {
-            post('[set_state] REJECTED: not enough args\n');
+            debug("set_state", "REJECTED: not enough args");
             return;
         }
         if (!isForThisDevice(args[0])) {
-            post('[set_state] REJECTED: not for this device (my id=' + new LiveAPI('this_device').id + ')\n');
+            debug("set_state", "REJECTED: not for this device");
             return;
         }
-        post('[set_state] ACCEPTED for this device\n');
+        debug("set_state", "ACCEPTED for this device");
 
         var idx = 1;  // Skip deviceId
 
@@ -304,7 +304,7 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
         for (var i = 0; i < 8; i++) {
             mutePattern.push(parseInt(args[idx++]));
         }
-        post('[set_state] Mute pattern to set: ' + mutePattern.join(',') + '\n');
+        debug("set_state", "Mute pattern: " + mutePattern.join(","));
         self.sequencers.muteSequencer.setPattern(mutePattern);
 
         // Mute length and rate
@@ -1513,47 +1513,7 @@ function temperature() {
         return;
     }
 
-    var rawValue = args[0];
-    var newTemperatureValue = Math.max(0.0, Math.min(1.0, parseFloat(rawValue)));
-
-    // Detect transition type
-    var wasActive = sequencer.temperatureValue > 0;
-    var willBeActive = newTemperatureValue > 0;
-
-    // Get current clip for state operations
-    var clip = sequencer.getCurrentClip();
-    var clipId = clip ? clip.id : null;
-
-    // V3.1: Handle state transitions
-    if (!wasActive && willBeActive) {
-        // Transition: 0 -> >0 (enable)
-        // Capture original pitches before any shuffling
-        if (clipId) {
-            sequencer.captureTemperatureState(clipId);
-        }
-        debug("temperature", "Enabled: captured original state");
-    } else if (wasActive && !willBeActive) {
-        // Transition: >0 -> 0 (disable)
-        // Restore original pitches
-        if (clipId) {
-            sequencer.restoreTemperatureState(clipId);
-        }
-        debug("temperature", "Disabled: restored original state");
-    }
-    // else: >0 -> >0 (intensity change only, no capture/restore)
-
-    // Update temperature value
-    sequencer.temperatureValue = newTemperatureValue;
-    sequencer.temperatureActive = willBeActive;
-
-    // Setup or clear loop jump observer
-    if (willBeActive) {
-        sequencer.setupTemperatureLoopJumpObserver();
-    } else {
-        sequencer.clearTemperatureLoopJumpObserver();
-    }
-
-    debug("temperature", "Set temperature to " + newTemperatureValue);
+    sequencer.setTemperatureValue(args[0]);
 }
 
 /**
@@ -1686,12 +1646,10 @@ function anything() {
     var address = messagename;
     var args = arrayfromargs(arguments);
 
-    // Log ALL incoming messages to see what's arriving
-    post('anything() received: ' + address + ' args: ' + args.join(', ') + '\n');
+    debug("anything", "received: " + address + " args: " + args.join(", "));
 
     // Only handle /looping/sequencer/ messages
     if (address.indexOf('/looping/sequencer/') !== 0) {
-        post('  -> ignoring (not /looping/sequencer/)\n');
         return;
     }
 
@@ -1710,11 +1668,11 @@ function anything() {
         // mute/step, mute/length, mute/rate, pitch/step, etc.
         command = 'seq_' + parts[0] + '_' + parts[1];
     } else {
-        post('Unknown sequencer command: ' + address + '\n');
+        debug("anything", "Unknown command: " + address);
         return;
     }
 
-    post('OSC -> ' + command + ' ' + args.join(' ') + '\n');
+    debug("anything", "OSC -> " + command + " " + args.join(" "));
     sequencer.commandRegistry.execute(command, args, sequencer);
 }
 
@@ -1756,11 +1714,6 @@ function setvalueof(v) {
 
 // Handle notifydeleted
 function notifydeleted() {
-    // Use observer registry for cleanup
+    // Use observer registry for cleanup (includes temperature loop_jump observer)
     sequencer.observerRegistry.clearAll();
-
-    // Clear temperature loop_jump observer
-    if (sequencer.transformations && sequencer.transformations.temperature) {
-        sequencer.transformations.temperature.clearLoopJumpObserver();
-    }
 }

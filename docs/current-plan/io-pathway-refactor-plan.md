@@ -1,10 +1,11 @@
 # Implementation Plan: Separate Input/Output Pathways
 
 **Issue:** #3 - Refactor: Separate input/output pathways for UI and OSC
-**Status:** Blocked
+**Status:** Ready
 **Created:** 2026-01-26
+**Updated:** 2026-02-20
 
-> **BLOCKER:** Before starting this refactor, we must fix Issue #4 - State not restoring properly when loading from saved Live Set. The pattr/state persistence mechanism needs to work correctly before we refactor its I/O pathways.
+> **Previously blocked by Issue #4** (state persistence bug). Issue #4 was fully resolved on 2026-02-19 via the robustness refactor (see `robustness-refactor-plan.md`). The codebase was also modularized into 10 CommonJS modules as part of that work — all `outlet()` calls are now isolated in `permute-device.js`, making this refactor cleaner.
 
 ---
 
@@ -61,6 +62,28 @@ Max UI commands ───►│ Inlet 2                   Outlet 2 │───�
 
 ---
 
+## Pre-Existing Issues to Fix During Refactor
+
+### Temperature Global Handlers Don't Broadcast
+
+The `temperature()` global function (line 1508) calls `setTemperatureValue()` but **never calls `broadcastState()`**. By contrast, the `seq_temperature` OSC command handler (line 275) calls both `setTemperatureValue()` and `broadcastState('temperature')`.
+
+This means when temperature is changed via the Max UI dial, the change takes effect locally but:
+- No OSC broadcast is sent (external displays don't update)
+- No pattr update is sent (change isn't persisted)
+
+The same gap exists for `temperature_reset()` (line 1524) and `temperature_shuffle()` (line 1546) — neither broadcasts.
+
+**Resolution:** Phase 3's `handleMaxUICommand()` must include broadcast calls for all temperature-related UI actions. During Phase 0.5, the temporary JS handlers for `temperature_ui` should also add the missing broadcast.
+
+### `setState()` Triggers Multiple Broadcasts During Restore
+
+When `restoreState()` calls `setState()`, the internal `sendSequencerFeedback()` calls trigger `broadcastState('position')` once per sequencer, then `restoreState()` itself calls `broadcastState('pattr_restore')`. This produces 3 broadcasts total (2x position + 1x pattr_restore).
+
+In the new architecture with separate outlets, this is redundant but not harmful (position broadcasts skip pattr). **Optimization opportunity:** During Phase 1, `setState()` could be updated to use `sendSequencerFeedbackLocal()` instead of `sendSequencerFeedback()`, with a single explicit broadcast at the end. This would reduce restore from 3 broadcasts to 1.
+
+---
+
 ## Phased Implementation
 
 ### Phase 0: Preparation & Testing
@@ -106,6 +129,16 @@ Set up the Max patch to send properly formatted messages from UI objects to JS. 
 The Max UI objects (step toggles, number boxes, etc.) need to send messages in a consistent format that the JS can parse. Currently the mute/pitch step UI sends an "active steps list" format (e.g., `4 7` meaning steps 4 and 7 are on). We need to:
 1. Prefix these with a message name so JS can route them
 2. Ensure all UI controls send to a dedicated path (future Inlet 2)
+
+#### Legacy Handler Retirement Strategy
+
+The existing `mute()` and `pitch()` global functions (lines 1421-1433) route Max UI messages through `handleSequencerMessage()` → `CommandRegistry` using legacy command names (`step`, `pattern`, `length`, `division`, etc.). These are the **current** Max UI entry points.
+
+**Phase 0.5:** Rewire Max patch UI objects to send new prefixed messages (`mute_ui_steps`, `temperature_ui`, etc.). Add temporary JS handlers in `anything()` that parse the new formats and delegate to existing setters. The old `mute()`/`pitch()` globals remain in the code but become **unused by the Max patch** — they are no longer wired to any UI object.
+
+**Phase 3:** When inlet separation is implemented, the new `handleMaxUICommand()` replaces the temporary `anything()` handlers from Phase 0.5. At this point, remove the legacy `mute()` and `pitch()` global functions and `handleSequencerMessage()` entirely — they have no remaining callers. Also remove the legacy command registrations (`tick`, `pattern`, `step`, `division`, `length`, `reset`, `bypass`) from `setupCommandHandlers()` unless they are still needed for OSC backward compatibility.
+
+**Verification:** After each phase, confirm no Max patch objects still route to the old `mute`/`pitch` message names. Search the `.maxpat` JSON for references.
 
 #### Tasks
 
@@ -170,7 +203,7 @@ All messages ──────►│ Inlet 0                   Outlet 0 │─�
 
 - [ ] **1.1** Update inlet/outlet definitions
   ```javascript
-  // permute-device.js line 42-43
+  // permute-device.js lines 13-14
   inlets = 1;
   outlets = 3;  // 0: UI, 1: OSC, 2: pattr
   ```
@@ -219,7 +252,13 @@ All messages ──────►│ Inlet 0                   Outlet 0 │─�
   - These should broadcast to all outlets
   - UI needs full state, OSC needs full state, pattr needs confirmation
 
-- [ ] **1.7** Test JS changes without Max patch updates
+- [ ] **1.7** Optimize `setState()` restore broadcasts (optional)
+  - Change `setState()` to call `sendSequencerFeedbackLocal()` instead of `sendSequencerFeedback()`
+  - This avoids 2 redundant `broadcastState('position')` calls during restore
+  - `restoreState()` and `setvalueof()` already call `broadcastState('pattr_restore')` explicitly after `setState()`
+  - Net effect: restore goes from 3 broadcasts to 1
+
+- [ ] **1.8** Test JS changes without Max patch updates
   - Load device in Ableton
   - Verify no errors in Max console
   - Outlets 1 and 2 will be unconnected (outputs dropped)
@@ -349,6 +388,8 @@ Max UI commands ───► Inlet 2 ─► handleMaxCommand()          ▼
   - Process direct Max commands (mute step, pitch length, etc.)
   - **Handle "active steps list" format** - Max UI sends `mute_ui_steps 4 7` meaning only steps 4 and 7 are on (see Appendix D)
   - Parse active indices and convert to full pattern array
+  - **Handle temperature UI messages** - `temperature_ui`, `temperature_reset_ui`, `temperature_shuffle_ui`
+    - These must call `setTemperatureValue()` AND broadcast (fixing the pre-existing gap where the old `temperature()` global never broadcast)
   - Update state
   - Skip UI output (outlet 0) - UI already reflects the change
   - Broadcast to OSC (outlet 1) - external world needs to know
@@ -387,6 +428,13 @@ Max UI commands ───► Inlet 2 ─► handleMaxCommand()          ▼
   }
   ```
 
+- [ ] **3.10** Remove legacy handlers
+  - Remove `mute()` and `pitch()` global functions (lines 1421-1433) — no longer wired from Max patch after Phase 0.5
+  - Remove `handleSequencerMessage()` (line 1024) — no remaining callers
+  - Remove legacy command registrations from `setupCommandHandlers()`: `tick`, `pattern`, `step`, `division`, `length`, `reset`, `bypass` (lines 152-207) — unless still needed for OSC backward compat
+  - Remove `temperature()`, `temperature_reset()`, `temperature_shuffle()` globals (lines 1508-1554) — replaced by `handleMaxUICommand()` routing
+  - Verify `.maxpat` has no remaining references to removed message names
+
 #### Exit Criteria
 - All three inlets functional
 - Routing rules correctly implemented
@@ -405,8 +453,9 @@ Update all documentation to reflect new architecture.
 #### Tasks
 
 - [ ] **4.1** Create ADR for this change
-  - `docs/adr/002-separate-io-pathways.md`
+  - `docs/adr/005-separate-io-pathways.md`
   - Document decision, alternatives considered, consequences
+  - Note: ADRs 001-004 already exist
 
 - [ ] **4.2** Update `docs/api.md`
   - Document new inlet/outlet structure
@@ -421,8 +470,9 @@ Update all documentation to reflect new architecture.
   - If any user-facing changes
 
 - [ ] **4.5** Remove obsolete code
-  - Remove unused origin-based routing logic
+  - Remove unused origin-based routing logic (most should already be gone after Phase 3)
   - Clean up any dead code paths
+  - Verify all legacy handler removal from Phase 3.10 is complete
 
 - [ ] **4.6** Close Issue #3
 
@@ -495,15 +545,24 @@ This plan does not include time estimates. Each phase should be completed and va
 
 ## Appendix A: Current Code Locations
 
-| Area | File | Lines |
-|------|------|-------|
-| Inlet/outlet definition | `permute-device.js` | 42-43 |
-| Message routing (anything) | `permute-device.js` | 2903-2937 |
-| Command handlers | `permute-device.js` | 1074-1223 |
-| State broadcast | `permute-device.js` | 2434-2512 |
-| UI feedback | `permute-device.js` | 2369-2400 |
-| pattr restore | `permute-device.js` | 2847-2896 |
-| Initialization | `permute-device.js` | 2809-2833 |
+> **Updated 2026-02-20** — line numbers reflect post-modularization codebase (~1720 lines in `permute-device.js`).
+
+| Area | File | Lines | Notes |
+|------|------|-------|-------|
+| Inlet/outlet definition | `permute-device.js` | 13-14 | `inlets = 1; outlets = 1;` |
+| Message routing (anything) | `permute-device.js` | 1645-1677 | Filters for `/looping/sequencer/` prefix, delegates to CommandRegistry |
+| Command handlers (setup) | `permute-device.js` | 139-337 | `setupCommandHandlers()` — legacy + OSC handlers |
+| State broadcast | `permute-device.js` | 1220-1300 | `broadcastState()` — sends `state_broadcast` + conditional `pattr_state` |
+| UI feedback (local) | `permute-device.js` | 1155-1170 | `sendSequencerFeedbackLocal()` — step values, position, active flag |
+| UI feedback (+ broadcast) | `permute-device.js` | 1179-1186 | `sendSequencerFeedback()` — calls local + `broadcastState('position')` |
+| pattr restore (flat format) | `permute-device.js` | 1596-1635 | `restoreState()` — 28-arg flat format, delegates to `setState()` |
+| pattr restore (JSON format) | `permute-device.js` | 1701-1713 | `setvalueof()` — JSON from pattrstorage, delegates to `setState()` |
+| Initialization | `permute-device.js` | 345-409 | `SequencerDevice.prototype.init()` |
+| Global Max handlers | `permute-device.js` | 1414-1720 | All `function name()` globals exposed to Max |
+| Legacy mute/pitch handlers | `permute-device.js` | 1421-1433 | `mute()`, `pitch()` → `handleSequencerMessage()` |
+| Temperature globals | `permute-device.js` | 1508-1554 | `temperature()`, `temperature_reset()`, `temperature_shuffle()` |
+| Global instance | `permute-device.js` | 1412 | `var sequencer = new SequencerDevice()` |
+| All `outlet()` calls | `permute-device.js` | 1162, 1166, 1169, 1285, 1298, 1570 | No outlet calls in any module file |
 
 ## Appendix B: Message Formats
 

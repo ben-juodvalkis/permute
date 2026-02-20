@@ -343,8 +343,6 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
  * Establishes track reference, detects track/instrument types, and sets up observers.
  */
 SequencerDevice.prototype.init = function() {
-    // TEMP: Init sequence logging — remove after verifying startup order (see Phase 2e)
-    post('[INIT-SEQ] init() called at ' + new Date().toISOString() + '\n');
     debug("init", "Starting sequencer initialization");
     try {
         // Cache Live API device ID for OSC command filtering
@@ -393,6 +391,10 @@ SequencerDevice.prototype.init = function() {
                     this.sendSequencerFeedbackLocal(cleanName);
                 }
             }
+
+            // If restoreState() ran before init(), patterns may already be active
+            // but observers weren't created (Live API wasn't ready). Check now.
+            this.checkAndActivateObservers();
 
             // Send initial state broadcast with 'init' origin
             this.broadcastState('init');
@@ -509,6 +511,11 @@ SequencerDevice.prototype.ensurePlaybackObservers = function() {
  */
 SequencerDevice.prototype.checkAndActivateObservers = function() {
     if (this.playbackObserversActive) return;
+
+    // Don't create observers before init() has established the track reference.
+    // restoreState() fires before init() and calls setPattern() which triggers this,
+    // but Live API isn't ready yet. init() calls this again after setup.
+    if (!this.trackState.ref) return;
 
     // Check if either sequencer is now active
     var muteActive = this.sequencers.muteSequencer.isActive();
@@ -1628,11 +1635,10 @@ function setState(stateJson) {
  */
 function restoreState() {
     var args = arrayfromargs(arguments);
-    // TEMP: Init sequence logging — remove after verifying startup order (see Phase 2e)
-    post('[INIT-SEQ] restoreState() called at ' + new Date().toISOString() + ' with ' + args.length + ' args\n');
+    debug("restoreState", "Called with " + args.length + " args");
 
     if (args.length < 28) {
-        post('[RESTORE] Not enough args (expected 28, got ' + args.length + '), skipping\n');
+        debug("restoreState", "Not enough args (expected 28, got " + args.length + "), skipping");
         return;
     }
 
@@ -1664,7 +1670,7 @@ function restoreState() {
     });
 
     sequencer.initialized = true;
-    post('[RESTORE] State restored via setState(), broadcasting...\n');
+    debug("restoreState", "State restored via setState(), broadcasting");
     sequencer.broadcastState('pattr_restore');
 }
 
@@ -1735,8 +1741,6 @@ function getvalueof() {
  * Restores sequencer state from JSON string.
  */
 function setvalueof(v) {
-    // TEMP: Init sequence logging — remove after verifying startup order (see Phase 2e)
-    post('[INIT-SEQ] setvalueof() called at ' + new Date().toISOString() + ' type=' + typeof v + '\n');
     if (v && typeof v === 'string') {
         try {
             var state = JSON.parse(v);

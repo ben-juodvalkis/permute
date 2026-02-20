@@ -511,6 +511,50 @@ All files placed alongside `permute-device.js` (flat structure per Max v8 constr
 
 **Validation:** Phase 3 manually verified in Ableton — device loads, modules resolve, all functionality works.
 
+### 2026-02-19 — Init Sequence Bug Fix (discovered via Phase 2e logging)
+
+**Finding:** `restoreState()` fires **before** `init()` on Live Set load. The sequence is:
+1. `restoreState(28 args)` — pattr sends saved state
+2. `init()` — Live API becomes available, track reference established
+3. `init()` — second call (from `bang`), harmless/idempotent
+
+**Bug:** `restoreState()` → `setState()` → `setPattern()` → `checkAndActivateObservers()` → `ensurePlaybackObservers()` tried to create transport/time-signature observers before Live API was initialized, causing `"Live API is not initialized"` errors.
+
+**Fix:**
+- Added `if (!this.trackState.ref) return` guard to `checkAndActivateObservers()` — prevents observer creation before `init()` establishes the track reference
+- Added `this.checkAndActivateObservers()` call at end of `init()` — picks up patterns that were restored before init, creating observers now that Live API is ready
+
+**Cleanup:**
+- Removed all `[INIT-SEQ]` temporary logging (Phase 2e) — startup order now documented
+- Converted remaining `post()` calls in `restoreState()` to `debug()` for consistency
+- Set `DEBUG_MODE = false` in `permute-utils.js`
+
 **What's left:**
 - Phase 4: Documentation (ADRs, CLAUDE.md update)
-- Remove `[INIT-SEQ]` logging after empirical verification in Ableton
+
+### 2026-02-19 — Phase 4 Implementation (Documentation)
+
+**Completed tasks:**
+
+#### 4.1: Created `docs/adr/003-robust-state-restoration.md`
+- Documents Phases 1-2: `restoreState()` bypass bug, `initialized` lifecycle flag
+- Documents the init sequence discovery (restoreState fires before init)
+- Documents the `checkAndActivateObservers()` guard fix
+
+#### 4.2: Created `docs/adr/004-modularization.md`
+- Documents Phase 3: CommonJS module extraction
+- Includes module table with line counts, dependency graph
+- Documents temperature mixin pattern and `lastParameterValue` rename
+- Notes Max4Live constraints (flat file structure, autowatch limitation)
+
+#### 4.3: Updated `CLAUDE.md`
+- Key Files table: Added all 9 new module files, updated permute-device.js description (~1766 lines)
+- Debug logging: Updated path from `permute-device.js line ~106` to `permute-utils.js line 16`
+- Test Changes: Added note about autowatch only watching main file
+- Architecture: Added "Initialization Lifecycle" and "Modular Architecture" sections
+
+#### 4.4: Checked `docs/api.md` — no updates needed
+- Broadcast format (29 args), origin values, and pattr persistence section all still accurate
+- `restoreState` internal change (delegates to setState) doesn't affect external API
+
+**All phases complete.** Robustness refactor fully implemented and documented.

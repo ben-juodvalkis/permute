@@ -608,67 +608,25 @@ Even with inlet-based routing, origin tags remain useful for frontend state cach
 
 ## Appendix D: Max UI Message Formats
 
-### Active Steps List Format
+### Full Row Values Format (Updated 2026-02-20)
 
-The Max UI objects for mute/pitch steps use a compact "active steps list" format rather than sending individual step values. This format sends only the indices of steps that are ON.
+The `live.grid` objects output full row data via `row <row#> <v0> <v1> ... <v7>`. After stripping the row number with `[zl slice 1]`, the 8 step values are prepended with the message name.
 
 **Format:**
 ```
-mute_ui_steps [index1] [index2] ...
-pitch_ui_steps [index1] [index2] ...
+mute_ui_steps [v0] [v1] [v2] [v3] [v4] [v5] [v6] [v7]
+pitch_ui_steps [v0] [v1] [v2] [v3] [v4] [v5] [v6] [v7]
 ```
 
 **Examples:**
 | UI State (steps 0-7) | Message Sent |
 |---------------------|--------------|
-| Steps 4 and 7 on | `mute_ui_steps 4 7` |
-| Steps 0, 2, 4, 6 on | `mute_ui_steps 0 2 4 6` |
-| All steps off | `mute_ui_steps` (no args) |
-| All steps on | `mute_ui_steps 0 1 2 3 4 5 6 7` |
+| Steps 1 and 3 on | `mute_ui_steps 0 1 0 1 0 0 0 0` |
+| Steps 0, 2, 4, 6 on | `mute_ui_steps 1 0 1 0 1 0 1 0` |
+| All steps off | `mute_ui_steps 0 0 0 0 0 0 0 0` |
+| All steps on | `mute_ui_steps 1 1 1 1 1 1 1 1` |
 
-**Parsing Logic for `handleMaxUICommand()`:**
-```javascript
-function parseActiveStepsList(args, patternLength) {
-    // Initialize all steps to 0 (off)
-    var pattern = [];
-    for (var i = 0; i < patternLength; i++) {
-        pattern[i] = 0;
-    }
-
-    // Set specified indices to 1 (on)
-    for (var j = 0; j < args.length; j++) {
-        var stepIndex = parseInt(args[j]);
-        if (stepIndex >= 0 && stepIndex < patternLength) {
-            pattern[stepIndex] = 1;
-        }
-    }
-
-    return pattern;
-}
-
-// In handleMaxUICommand():
-function handleMaxUICommand(messagename, args) {
-    if (messagename === 'mute_ui_steps') {
-        var pattern = parseActiveStepsList(args, sequencers.muteSequencer.length);
-        sequencers.muteSequencer.setPattern(pattern);
-        broadcastToOSC('mute_pattern');
-        broadcastToPattr();
-        // Note: Skip broadcastToUI() - UI already reflects the change
-    }
-    else if (messagename === 'pitch_ui_steps') {
-        var pattern = parseActiveStepsList(args, sequencers.pitchSequencer.length);
-        sequencers.pitchSequencer.setPattern(pattern);
-        broadcastToOSC('pitch_pattern');
-        broadcastToPattr();
-    }
-    // ... other UI commands
-}
-```
-
-**Why This Format?**
-- Max UI objects (like `[matrixctrl]` or step sequencer UIs) often output selected indices
-- More efficient for sparse patterns (few steps on)
-- Requires conversion to full pattern array in JS
+**JS handler** (in `anything()`): Passes values directly to `seq.setPattern()`. No conversion needed — the grid output is already a pattern array.
 
 **Phase 3 Task Addition:**
 This format handling should be implemented in task 3.5 (`handleMaxUICommand()`). The function must:
@@ -807,3 +765,35 @@ These changes prepare the UI for inlet separation (Phase 3) but work now via `an
 3. Check Max console for errors
 4. Save Live Set, close, reopen — verify state restores
 5. If using OSC frontend, verify state broadcasts are received
+
+### 2026-02-20 (continued): Phase 0.5 Max Patch + Phase 2 Complete
+
+**Max patch changes (Permute.amxd):**
+
+1. **Phase 2 — Outlet rewiring** (done earlier this session)
+   - v8 outlet 0 → `[route mute_current pitch_current]` (simplified from 4 match words to 2)
+   - v8 outlet 1 → `[route state_broadcast]` → `[prepend /looping/sequencer/state]` → `[udpsend]` (OSC)
+   - v8 outlet 2 → `[route pattr_state]` → `[pattr seq_state]` (persistence)
+
+2. **Phase 0.5 — UI object rewiring**
+   - Mute grid: replaced `[iter]`/`[counter]`/`[join]`/`[prepend mute step]` chain with `[prepend mute_ui_steps]` (sends full 8-value row)
+   - Pitch grid: same — `[prepend pitch_ui_steps]`
+   - Mute length: `[prepend mute length]` → `[prepend mute_ui_length]`
+
+3. **Feedback loop fix**
+   - **Problem:** State broadcast updates grids via `setcell` → grid re-emits row → `mute_ui_steps` → v8 → broadcast → infinite loop / crash
+   - **Solution (Max patch):** Added `[gate]` on the grid→v8 path, closed during state broadcast feedback updates
+   - **Solution (JS):** Added unchanged-pattern comparison guard in `mute_ui_steps`/`pitch_ui_steps` and `mute_ui_length`/`pitch_ui_length` handlers as defense-in-depth (JS guard alone was insufficient — Max dispatch recurses before JS comparison can fire)
+   - **Lesson learned:** Any path where v8 output feeds back to a UI object that re-triggers v8 input needs a gate or guard. Document this for Phase 3 inlet separation.
+
+**JS changes (permute-device.js):**
+- `mute_ui_steps`/`pitch_ui_steps` handlers now compare incoming pattern against current pattern; skip broadcast if unchanged
+- `mute_ui_length`/`pitch_ui_length` handlers now compare incoming length against current length; skip broadcast if unchanged
+
+**Status after Phase 0.5 + Phase 2:**
+- Phases 0.5, 1, and 2 are complete
+- All outlet separation is live and tested
+- UI objects use new `*_ui_*` message formats
+- Feedback loop prevented by Max gate + JS guard
+- Legacy `mute()`/`pitch()` globals and `handleSequencerMessage()` are now dead code (nothing sends to them)
+- **Next:** Phase 3 (inlet separation) or Phase 4 (docs/cleanup)

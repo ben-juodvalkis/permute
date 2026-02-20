@@ -1711,13 +1711,21 @@ function anything() {
     if (address === 'mute_ui_steps' || address === 'pitch_ui_steps') {
         var seqName = (address === 'mute_ui_steps') ? 'mute' : 'pitch';
         var seq = sequencer.sequencers[seqName + 'Sequencer'];
-        // Parse active steps list: args are indices of ON steps (e.g., [0, 2, 4])
+        // Args are the full row values from live.grid: [v0, v1, v2, ..., v7]
+        // Each value is 0 (off) or 1 (on)
         var pattern = [];
-        for (var i = 0; i < seq.patternLength; i++) pattern[i] = 0;
-        for (var j = 0; j < args.length; j++) {
-            var idx = parseInt(args[j]);
-            if (idx >= 0 && idx < seq.patternLength) pattern[idx] = 1;
+        for (var i = 0; i < args.length; i++) {
+            pattern.push(parseInt(args[i]));
         }
+        // Break feedback loop: state_broadcast updates grid via setcell,
+        // grid re-emits row, which arrives here again. Skip if unchanged.
+        var unchanged = (pattern.length === seq.pattern.length);
+        if (unchanged) {
+            for (var i = 0; i < pattern.length; i++) {
+                if (pattern[i] !== seq.pattern[i]) { unchanged = false; break; }
+            }
+        }
+        if (unchanged) return;
         seq.setPattern(pattern);
         sequencer.broadcastToOSC(seqName + '_pattern');
         sequencer.broadcastToPattr();
@@ -1728,7 +1736,9 @@ function anything() {
         var seqName = (address === 'mute_ui_length') ? 'mute' : 'pitch';
         var seq = sequencer.sequencers[seqName + 'Sequencer'];
         if (args.length >= 1) {
-            seq.setLength(parseInt(args[0]));
+            var newLength = parseInt(args[0]);
+            if (newLength === seq.patternLength) return;  // Break feedback loop
+            seq.setLength(newLength);
             sequencer.broadcastToOSC(seqName + '_length');
             sequencer.broadcastToPattr();
         }

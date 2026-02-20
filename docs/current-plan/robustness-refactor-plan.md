@@ -474,3 +474,43 @@ permute-state.js              (no deps)
 - Phase 3: Modularization into CommonJS modules (separate commit)
 - Phase 4: Documentation (ADRs, CLAUDE.md update)
 - Remove `[INIT-SEQ]` logging after empirical verification in Ableton
+
+### 2026-02-19 — Phase 3 Implementation (Modularization)
+
+**Completed tasks:**
+
+#### 3.1–3.9: Extract 9 CommonJS modules
+
+| New File | Lines | Contents |
+|----------|-------|----------|
+| `permute-constants.js` | 91 | `TRANSPOSE_CONFIG`, all constants, `VALUE_TYPES` |
+| `permute-utils.js` | 293 | `debug()`, `handleError()`, `parseNotesResponse()`, `createObserver()`, `defer()`, `calculateTicksPerStep()`, `findTransposeParameterByName()`, `isParameterTransposeDevice()` |
+| `permute-sequencer.js` | 198 | `Sequencer` class; renamed `lastAppliedValue` → `lastParameterValue` |
+| `permute-observer-registry.js` | 64 | `ObserverRegistry` class |
+| `permute-state.js` | 99 | `TrackState`, `ClipState`, `TransportState` |
+| `permute-instruments.js` | 176 | `InstrumentDetector`, `InstrumentStrategy`, `TransposeStrategy`, `DefaultInstrumentStrategy` |
+| `permute-commands.js` | 44 | `CommandRegistry` class |
+| `permute-shuffle.js` | 173 | Pure functions: `fisherYatesShuffle`, `generateSwapPattern`, `applySwapPattern` |
+| `permute-temperature.js` | 322 | Temperature mixin with `_getCurrentPitchOffset()` helper (consolidates 3 duplications) |
+
+All files placed alongside `permute-device.js` (flat structure per Max v8 constraint).
+
+#### 3.10: Update `permute-device.js`
+- Added `require()` imports for all 9 modules at top of file
+- Unpacked frequently used constants, utils, and classes into local vars
+- Removed all extracted code (constants, utilities, Sequencer class, ObserverRegistry, state objects, instrument classes, CommandRegistry, shuffle functions, temperature methods)
+- Applied temperature mixin: `temperature.applyTemperatureMethods(SequencerDevice.prototype)`
+- Renamed all `lastAppliedValue` references → `lastParameterValue` (4 occurrences)
+
+#### 3.11: Verification
+- `permute-device.js` reduced from ~3055 to 1762 lines
+- Total across all files: 3222 lines (overhead from module boilerplate)
+- Device loads in Ableton without errors
+- All functionality verified working (state persistence, transport, temperature)
+- No behavioral changes — pure structural refactor
+
+**Validation:** Phase 3 manually verified in Ableton — device loads, modules resolve, all functionality works.
+
+**What's left:**
+- Phase 4: Documentation (ADRs, CLAUDE.md update)
+- Remove `[INIT-SEQ]` logging after empirical verification in Ableton

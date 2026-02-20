@@ -1065,6 +1065,9 @@ function SequencerDevice() {
     // V3.0: Batching queue
     this.pendingApplies = {}; // clipId -> { mute, pitch, scheduled, task }
 
+    // Initialization lifecycle flag - prevents pattr_state output during init/restore window
+    this.initialized = false;
+
     // State management objects
     this.trackState = new TrackState();
     this.clipState = new ClipState();
@@ -1312,6 +1315,8 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
  * Establishes track reference, detects track/instrument types, and sets up observers.
  */
 SequencerDevice.prototype.init = function() {
+    // TEMP: Init sequence logging — remove after verifying startup order (see Phase 2e)
+    post('[INIT-SEQ] init() called at ' + new Date().toISOString() + '\n');
     debug("init", "Starting sequencer initialization");
     try {
         // Cache Live API device ID for OSC command filtering
@@ -1363,6 +1368,8 @@ SequencerDevice.prototype.init = function() {
 
             // Send initial state broadcast with 'init' origin
             this.broadcastState('init');
+
+            this.initialized = true;
         } else {
             handleError("init", "Could not find track reference", true);
         }
@@ -2551,7 +2558,8 @@ SequencerDevice.prototype.broadcastState = function(origin) {
     // We want: ["pattr_state", trackIndex, data...] (skip origin at index 2)
     // Skip for position updates - they happen constantly during playback and don't need persistence
     // Skip for pattr_restore - we just loaded from pattr, no need to save back (prevents feedback loop)
-    if (origin !== 'position' && origin !== 'pattr_restore') {
+    // Skip until initialized - prevents default state from overwriting saved pattr data during startup
+    if (this.initialized && origin !== 'position' && origin !== 'pattr_restore' && origin !== 'init') {
         var pattrArgs = ["pattr_state", args[1]].concat(args.slice(3));
         outlet.apply(null, [0].concat(pattrArgs));
     }
@@ -2893,49 +2901,43 @@ function setState(stateJson) {
  */
 function restoreState() {
     var args = arrayfromargs(arguments);
-    post('[RESTORE] restoreState called with ' + args.length + ' args\n');
+    // TEMP: Init sequence logging — remove after verifying startup order (see Phase 2e)
+    post('[INIT-SEQ] restoreState() called at ' + new Date().toISOString() + ' with ' + args.length + ' args\n');
 
     if (args.length < 28) {
         post('[RESTORE] Not enough args (expected 28, got ' + args.length + '), skipping\n');
         return;
     }
 
+    // Parse flat 28-arg format into state object, then delegate to setState()
+    // This ensures all setter side effects fire (observer activation, timing calculation, etc.)
     var idx = 1;  // Skip trackIndex (arg 0)
 
-    // Mute pattern (8 steps)
-    for (var i = 0; i < 8; i++) {
-        sequencer.sequencers.muteSequencer.pattern[i] = parseInt(args[idx++]);
-    }
+    var mutePattern = [];
+    for (var i = 0; i < 8; i++) mutePattern.push(parseInt(args[idx++]));
+    var muteLength = parseInt(args[idx++]);
+    var muteDivision = [parseInt(args[idx++]), parseInt(args[idx++]), parseInt(args[idx++])];
+    idx++;  // Skip mute position (runtime state)
 
-    // Mute length and division
-    sequencer.sequencers.muteSequencer.patternLength = parseInt(args[idx++]);
-    var muteBars = parseInt(args[idx++]);
-    var muteBeats = parseInt(args[idx++]);
-    var muteTicks = parseInt(args[idx++]);
-    sequencer.sequencers.muteSequencer.division = [muteBars, muteBeats, muteTicks];
+    var pitchPattern = [];
+    for (var i = 0; i < 8; i++) pitchPattern.push(parseInt(args[idx++]));
+    var pitchLength = parseInt(args[idx++]);
+    var pitchDivision = [parseInt(args[idx++]), parseInt(args[idx++]), parseInt(args[idx++])];
+    idx++;  // Skip pitch position (runtime state)
 
-    // Skip mute position (runtime state, not saved)
-    idx += 1;
+    var temp = parseFloat(args[idx++]);
 
-    // Pitch pattern (8 steps)
-    for (var i = 0; i < 8; i++) {
-        sequencer.sequencers.pitchSequencer.pattern[i] = parseInt(args[idx++]);
-    }
+    sequencer.setState({
+        version: '3.1',
+        sequencers: {
+            mute: { pattern: mutePattern, patternLength: muteLength, division: muteDivision },
+            pitch: { pattern: pitchPattern, patternLength: pitchLength, division: pitchDivision }
+        },
+        temperature: temp
+    });
 
-    // Pitch length and division
-    sequencer.sequencers.pitchSequencer.patternLength = parseInt(args[idx++]);
-    var pitchBars = parseInt(args[idx++]);
-    var pitchBeats = parseInt(args[idx++]);
-    var pitchTicks = parseInt(args[idx++]);
-    sequencer.sequencers.pitchSequencer.division = [pitchBars, pitchBeats, pitchTicks];
-
-    // Skip pitch position (runtime state, not saved)
-    idx += 1;
-
-    // Temperature
-    sequencer.temperatureValue = parseFloat(args[idx++]);
-
-    post('[RESTORE] State restored, broadcasting...\n');
+    sequencer.initialized = true;
+    post('[RESTORE] State restored via setState(), broadcasting...\n');
     sequencer.broadcastState('pattr_restore');
 }
 
@@ -2995,22 +2997,9 @@ function loadbang() {
  * Returns sequencer state as JSON string.
  */
 function getvalueof() {
-    // Debug: check if sequencer and its sequencers exist
-    post('[STATE] getvalueof called\n');
-    post('[STATE] sequencer exists: ' + (sequencer ? 'yes' : 'no') + '\n');
-    post('[STATE] sequencer.sequencers exists: ' + (sequencer && sequencer.sequencers ? 'yes' : 'no') + '\n');
-    post('[STATE] muteSequencer exists: ' + (sequencer && sequencer.sequencers && sequencer.sequencers.muteSequencer ? 'yes' : 'no') + '\n');
-
-    // Direct read from the sequencer object
-    if (sequencer && sequencer.sequencers && sequencer.sequencers.muteSequencer) {
-        post('[STATE] DIRECT muteSequencer.pattern: ' + sequencer.sequencers.muteSequencer.pattern.join(',') + '\n');
-    }
-
     var state = sequencer.getState();
     var json = JSON.stringify(state);
-    post('[STATE] getState() returned mute pattern: ' + state.sequencers.mute.pattern.join(',') + '\n');
-    post('[STATE] version: ' + state.version + ', temperature: ' + state.temperature + '\n');
-    post('[STATE] pitch pattern: ' + state.sequencers.pitch.pattern.join(',') + '\n');
+    debug("getvalueof", "Saving state", { version: state.version, temperature: state.temperature });
     return json;
 }
 
@@ -3019,26 +3008,18 @@ function getvalueof() {
  * Restores sequencer state from JSON string.
  */
 function setvalueof(v) {
-    post('[STATE] setvalueof called with type: ' + typeof v + '\n');
-    if (v) {
-        post('[STATE] value: ' + (typeof v === 'string' ? v.substring(0, 100) : JSON.stringify(v).substring(0, 100)) + '...\n');
-    }
-
+    // TEMP: Init sequence logging — remove after verifying startup order (see Phase 2e)
+    post('[INIT-SEQ] setvalueof() called at ' + new Date().toISOString() + ' type=' + typeof v + '\n');
     if (v && typeof v === 'string') {
         try {
             var state = JSON.parse(v);
-            post('[STATE] Parsed state version: ' + state.version + '\n');
-            post('[STATE] mute pattern: ' + (state.sequencers && state.sequencers.mute ? state.sequencers.mute.pattern.join(',') : 'N/A') + '\n');
+            debug("setvalueof", "Restoring state", { version: state.version });
             sequencer.setState(state);
-            post('[STATE] setState complete, broadcasting...\n');
-            // Broadcast restored state to UI
+            sequencer.initialized = true;
             sequencer.broadcastState('pattr_restore');
-            post('[STATE] Restore complete\n');
         } catch (e) {
-            post('[STATE] Error restoring state: ' + e + '\n');
+            handleError("setvalueof", e, true);
         }
-    } else {
-        post('[STATE] Skipping - invalid value type or empty\n');
     }
 }
 

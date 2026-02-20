@@ -426,3 +426,49 @@ permute-state.js              (no deps)
 - `docs/current-plan/io-pathway-refactor-plan.md` (blocked by this fix)
 - Issue #3: Separate input/output pathways
 - Issue #4: State not restoring properly
+
+---
+
+## Work Log
+
+### 2026-02-19 — Phase 1 + Phase 2 Implementation
+
+**Completed tasks:**
+
+#### Phase 1a: Rewrite `restoreState()` as thin adapter (line 2902)
+- Replaced direct property writes (`sequencer.sequencers.muteSequencer.pattern[i] = ...`) with flat-arg parsing into a JSON state object
+- Delegates to `sequencer.setState()` which calls proper setters: `setPattern()`, `setLength()`, `setDivision()`, `setTemperatureValue()`
+- All setter side effects now fire on restore: observer activation, timing calculation, temperature state handling
+
+#### Phase 1c: Exclude `'init'` origin from pattr_state output (line 2562)
+- Added `&& origin !== 'init'` to the pattr_state guard in `broadcastState()`
+- Prevents `init()` from broadcasting default state to pattr, which would overwrite saved data before `restoreState()` runs
+
+#### Phase 1d: Clean up debug logging in `getvalueof()` / `setvalueof()`
+- `getvalueof()` (line 2999): Replaced 8 verbose `post()` investigation lines with single `debug()` call
+- `setvalueof()` (line 3010): Replaced 7 verbose `post()` lines with `debug()` + `handleError()`, removed dead else branch
+
+#### Phase 2a: Add `initialized` flag to constructor (line 1069)
+- `this.initialized = false` in `SequencerDevice` constructor
+
+#### Phase 2b: Guard pattr_state output with `initialized` flag (line 2562)
+- Changed condition to `this.initialized && origin !== 'position' && origin !== 'pattr_restore' && origin !== 'init'`
+- Prevents any pattr_state output during the init/restore startup window
+
+#### Phase 2c-d: Set `initialized = true` in all three paths
+- `init()` (line 1372): Set after `broadcastState('init')` completes
+- `restoreState()` (line 2939): Set after `setState()` delegates to proper setters
+- `setvalueof()` (line 3018): Set after `setState()` delegates to proper setters
+- Whichever path runs last wins — idempotent, no race condition
+
+#### Phase 2e: Temporary init sequence logging
+- Added `[INIT-SEQ]` timestamped `post()` calls in `init()`, `restoreState()`, `setvalueof()`
+- Purpose: Empirically verify Max startup order (init → restoreState? → setvalueof?)
+- Marked with `// TEMP:` comments for easy removal after verification
+
+**Net line change:** ~-25 lines (removed verbose logging, simplified restore paths)
+
+**What's left:**
+- Phase 3: Modularization into CommonJS modules (separate commit)
+- Phase 4: Documentation (ADRs, CLAUDE.md update)
+- Remove `[INIT-SEQ]` logging after empirical verification in Ableton

@@ -10,7 +10,16 @@ Permute is a Max4Live device that provides mute sequencing, pitch sequencing, an
 
 | File | Purpose |
 |------|---------|
-| `permute-device.js` | Core JavaScript (~3000 lines) - all sequencer logic |
+| `permute-device.js` | Main controller (~1766 lines) - SequencerDevice, Max handlers |
+| `permute-constants.js` | Constants, TRANSPOSE_CONFIG, VALUE_TYPES |
+| `permute-utils.js` | Debug, error handling, LiveAPI helpers |
+| `permute-sequencer.js` | Generic Sequencer class (pattern/timing) |
+| `permute-observer-registry.js` | ObserverRegistry for Live API observers |
+| `permute-state.js` | TrackState, ClipState, TransportState classes |
+| `permute-instruments.js` | Instrument detection, transpose strategies |
+| `permute-commands.js` | CommandRegistry (message dispatch) |
+| `permute-shuffle.js` | Fisher-Yates shuffle, swap pattern generation |
+| `permute-temperature.js` | Temperature mixin (applied to SequencerDevice prototype) |
 | `Permute.amxd` | Max4Live device file (load this in Ableton) |
 | `Permute.maxpat` | Max patch (UI and routing) |
 | `README.md` | User-facing documentation |
@@ -37,6 +46,14 @@ This eliminated ~30% of code compared to the previous pristine-state approach.
 - `TransposeStrategy` - Parameter-based pitch shifting
 - `ObserverRegistry` - Centralized Live API observer management
 - `CommandRegistry` - Message dispatch pattern
+
+### Initialization Lifecycle
+
+Max startup order: `restoreState()` fires BEFORE `init()`. The `initialized` flag gates `pattr_state` output to prevent `init()` from overwriting saved state. Observer creation is deferred until `init()` establishes the track reference.
+
+### Modular Architecture
+
+Code is split into 10 CommonJS modules (flat directory, Max4Live constraint). Temperature methods use a mixin pattern applied to `SequencerDevice.prototype`. See `docs/adr/004-modularization.md`.
 
 ### Lazy Observer Activation (v6.0)
 
@@ -71,15 +88,16 @@ Origin tags enable echo filtering - see `docs/api.md` for details.
 ## Common Development Tasks
 
 ### Enable Debug Logging
-In `permute-device.js` line ~106:
+In `permute-utils.js` line 16:
 ```javascript
 var DEBUG_MODE = true;
 ```
 
 ### Test Changes
-1. Save `permute-device.js`
-2. In Ableton, delete and re-add `Permute.amxd` to reload
-3. Check Max console for errors/debug output
+1. Save the changed file(s)
+2. If only `permute-device.js` changed, saving triggers `autowatch` reload
+3. If a module file changed, delete and re-add `Permute.amxd` to reload (autowatch only watches the main file)
+4. Check Max console for errors/debug output
 
 ### Add New OSC Command
 1. Add handler in `setupCommandHandlers()` method

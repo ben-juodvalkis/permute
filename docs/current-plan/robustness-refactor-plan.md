@@ -426,3 +426,135 @@ permute-state.js              (no deps)
 - `docs/current-plan/io-pathway-refactor-plan.md` (blocked by this fix)
 - Issue #3: Separate input/output pathways
 - Issue #4: State not restoring properly
+
+---
+
+## Work Log
+
+### 2026-02-19 — Phase 1 + Phase 2 Implementation
+
+**Completed tasks:**
+
+#### Phase 1a: Rewrite `restoreState()` as thin adapter (line 2902)
+- Replaced direct property writes (`sequencer.sequencers.muteSequencer.pattern[i] = ...`) with flat-arg parsing into a JSON state object
+- Delegates to `sequencer.setState()` which calls proper setters: `setPattern()`, `setLength()`, `setDivision()`, `setTemperatureValue()`
+- All setter side effects now fire on restore: observer activation, timing calculation, temperature state handling
+
+#### Phase 1c: Exclude `'init'` origin from pattr_state output (line 2562)
+- Added `&& origin !== 'init'` to the pattr_state guard in `broadcastState()`
+- Prevents `init()` from broadcasting default state to pattr, which would overwrite saved data before `restoreState()` runs
+
+#### Phase 1d: Clean up debug logging in `getvalueof()` / `setvalueof()`
+- `getvalueof()` (line 2999): Replaced 8 verbose `post()` investigation lines with single `debug()` call
+- `setvalueof()` (line 3010): Replaced 7 verbose `post()` lines with `debug()` + `handleError()`, removed dead else branch
+
+#### Phase 2a: Add `initialized` flag to constructor (line 1069)
+- `this.initialized = false` in `SequencerDevice` constructor
+
+#### Phase 2b: Guard pattr_state output with `initialized` flag (line 2562)
+- Changed condition to `this.initialized && origin !== 'position' && origin !== 'pattr_restore' && origin !== 'init'`
+- Prevents any pattr_state output during the init/restore startup window
+
+#### Phase 2c-d: Set `initialized = true` in all three paths
+- `init()` (line 1372): Set after `broadcastState('init')` completes
+- `restoreState()` (line 2939): Set after `setState()` delegates to proper setters
+- `setvalueof()` (line 3018): Set after `setState()` delegates to proper setters
+- Whichever path runs last wins — idempotent, no race condition
+
+#### Phase 2e: Temporary init sequence logging
+- Added `[INIT-SEQ]` timestamped `post()` calls in `init()`, `restoreState()`, `setvalueof()`
+- Purpose: Empirically verify Max startup order (init → restoreState? → setvalueof?)
+- Marked with `// TEMP:` comments for easy removal after verification
+
+**Net line change:** ~-25 lines (removed verbose logging, simplified restore paths)
+
+**Validation:** Phase 1+2 manually verified in Ableton — state restores correctly on Live Set load.
+
+**What's left:**
+- Phase 3: Modularization into CommonJS modules (separate commit)
+- Phase 4: Documentation (ADRs, CLAUDE.md update)
+- Remove `[INIT-SEQ]` logging after empirical verification in Ableton
+
+### 2026-02-19 — Phase 3 Implementation (Modularization)
+
+**Completed tasks:**
+
+#### 3.1–3.9: Extract 9 CommonJS modules
+
+| New File | Lines | Contents |
+|----------|-------|----------|
+| `permute-constants.js` | 91 | `TRANSPOSE_CONFIG`, all constants, `VALUE_TYPES` |
+| `permute-utils.js` | 293 | `debug()`, `handleError()`, `parseNotesResponse()`, `createObserver()`, `defer()`, `calculateTicksPerStep()`, `findTransposeParameterByName()`, `isParameterTransposeDevice()` |
+| `permute-sequencer.js` | 198 | `Sequencer` class; renamed `lastAppliedValue` → `lastParameterValue` |
+| `permute-observer-registry.js` | 64 | `ObserverRegistry` class |
+| `permute-state.js` | 99 | `TrackState`, `ClipState`, `TransportState` |
+| `permute-instruments.js` | 176 | `InstrumentDetector`, `InstrumentStrategy`, `TransposeStrategy`, `DefaultInstrumentStrategy` |
+| `permute-commands.js` | 44 | `CommandRegistry` class |
+| `permute-shuffle.js` | 173 | Pure functions: `fisherYatesShuffle`, `generateSwapPattern`, `applySwapPattern` |
+| `permute-temperature.js` | 322 | Temperature mixin with `_getCurrentPitchOffset()` helper (consolidates 3 duplications) |
+
+All files placed alongside `permute-device.js` (flat structure per Max v8 constraint).
+
+#### 3.10: Update `permute-device.js`
+- Added `require()` imports for all 9 modules at top of file
+- Unpacked frequently used constants, utils, and classes into local vars
+- Removed all extracted code (constants, utilities, Sequencer class, ObserverRegistry, state objects, instrument classes, CommandRegistry, shuffle functions, temperature methods)
+- Applied temperature mixin: `temperature.applyTemperatureMethods(SequencerDevice.prototype)`
+- Renamed all `lastAppliedValue` references → `lastParameterValue` (4 occurrences)
+
+#### 3.11: Verification
+- `permute-device.js` reduced from ~3055 to 1762 lines
+- Total across all files: 3222 lines (overhead from module boilerplate)
+- Device loads in Ableton without errors
+- All functionality verified working (state persistence, transport, temperature)
+- No behavioral changes — pure structural refactor
+
+**Validation:** Phase 3 manually verified in Ableton — device loads, modules resolve, all functionality works.
+
+### 2026-02-19 — Init Sequence Bug Fix (discovered via Phase 2e logging)
+
+**Finding:** `restoreState()` fires **before** `init()` on Live Set load. The sequence is:
+1. `restoreState(28 args)` — pattr sends saved state
+2. `init()` — Live API becomes available, track reference established
+3. `init()` — second call (from `bang`), harmless/idempotent
+
+**Bug:** `restoreState()` → `setState()` → `setPattern()` → `checkAndActivateObservers()` → `ensurePlaybackObservers()` tried to create transport/time-signature observers before Live API was initialized, causing `"Live API is not initialized"` errors.
+
+**Fix:**
+- Added `if (!this.trackState.ref) return` guard to `checkAndActivateObservers()` — prevents observer creation before `init()` establishes the track reference
+- Added `this.checkAndActivateObservers()` call at end of `init()` — picks up patterns that were restored before init, creating observers now that Live API is ready
+
+**Cleanup:**
+- Removed all `[INIT-SEQ]` temporary logging (Phase 2e) — startup order now documented
+- Converted remaining `post()` calls in `restoreState()` to `debug()` for consistency
+- Set `DEBUG_MODE = false` in `permute-utils.js`
+
+**What's left:**
+- Phase 4: Documentation (ADRs, CLAUDE.md update)
+
+### 2026-02-19 — Phase 4 Implementation (Documentation)
+
+**Completed tasks:**
+
+#### 4.1: Created `docs/adr/003-robust-state-restoration.md`
+- Documents Phases 1-2: `restoreState()` bypass bug, `initialized` lifecycle flag
+- Documents the init sequence discovery (restoreState fires before init)
+- Documents the `checkAndActivateObservers()` guard fix
+
+#### 4.2: Created `docs/adr/004-modularization.md`
+- Documents Phase 3: CommonJS module extraction
+- Includes module table with line counts, dependency graph
+- Documents temperature mixin pattern and `lastParameterValue` rename
+- Notes Max4Live constraints (flat file structure, autowatch limitation)
+
+#### 4.3: Updated `CLAUDE.md`
+- Key Files table: Added all 9 new module files, updated permute-device.js description (~1766 lines)
+- Debug logging: Updated path from `permute-device.js line ~106` to `permute-utils.js line 16`
+- Test Changes: Added note about autowatch only watching main file
+- Architecture: Added "Initialization Lifecycle" and "Modular Architecture" sections
+
+#### 4.4: Checked `docs/api.md` — no updates needed
+- Broadcast format (29 args), origin values, and pattr persistence section all still accurate
+- `restoreState` internal change (delegates to setState) doesn't affect external API
+
+**All phases complete.** Robustness refactor fully implemented and documented.

@@ -468,6 +468,8 @@ permute-state.js              (no deps)
 
 **Net line change:** ~-25 lines (removed verbose logging, simplified restore paths)
 
+**Validation:** Phase 1+2 manually verified in Ableton — state restores correctly on Live Set load.
+
 **What's left:**
 - Phase 3: Modularization into CommonJS modules (separate commit)
 - Phase 4: Documentation (ADRs, CLAUDE.md update)

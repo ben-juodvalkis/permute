@@ -423,6 +423,11 @@ SequencerDevice.prototype.setupDeviceObserver = function() {
         "devices",
         function(args) {
             defer(function() {
+                // V5.0: Revert current transpose before re-detecting, so we
+                // don't capture a shifted value as the new "original".
+                if (self.instrumentType === 'parameter_transpose') {
+                    self.instrumentStrategy.revertTranspose();
+                }
                 // V3.0: Re-detect instrument type on device changes
                 self.detectInstrumentType();
             });
@@ -556,8 +561,12 @@ SequencerDevice.prototype.onTransportStart = function() {
     debug("transport", "Transport started");
     this.transportState.setPlaying(true);
 
-    // Detect instrument type for pitch transformation
-    this.detectInstrumentType();
+    // V5.0: Do NOT call detectInstrumentType() here.
+    // It creates a new TransposeStrategy instance, discarding the preserved
+    // originalTranspose value and causing runaway octave shifting on quick
+    // stop/start cycles (the deferred revert may not have landed yet when
+    // the new strategy reads the param). Instrument detection is already
+    // handled by init() and the device observer (setupDeviceObserver).
 
     // V3.1: If temperature was set before transport started, capture state now
     if (this.temperatureValue > 0) {

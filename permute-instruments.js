@@ -145,10 +145,12 @@ TransposeStrategy.prototype.revertTranspose = function() {
     debug("transpose", "revertTranspose called, originalTranspose=" + this.originalTranspose);
     this.applyTranspose(false);
     debug("transpose", "revertTranspose complete");
-    // Do not reset originalTranspose here - it must persist across transport
-    // cycles to prevent octave jumping on stop/restart (issue #9).
-    // It is naturally reset when a new strategy instance is created via
-    // detectInstrumentType().
+    // Do not reset originalTranspose here - it persists across transport
+    // cycles so that applyTranspose() uses the known-good baseline rather
+    // than re-reading the param (which may still hold a shifted value if
+    // the revert hasn't propagated yet). V5.0: Strategy instances now
+    // persist across transport cycles (detectInstrumentType is no longer
+    // called on transport start), so this preservation is essential.
 };
 
 /**

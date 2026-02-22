@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Accepted (implemented)
+
+**Supersedes:** ADR-002 (restore-state-format-fix), ADR-003 (robust-state-restoration) — both dealt with pattr synchronization problems that no longer exist.
 
 ## Context
 
@@ -23,7 +25,7 @@ The pattr layer was entirely redundant — UI elements already auto-persist via 
 
 ## Decision
 
-Remove the pattr persistence layer entirely. UI elements with `parameter_enable: 1` are the sole source of truth for persistence. On device load, `init()` sends `request_ui_values` via outlet 0, triggering the Max patch to re-emit all UI element values to the JS via inlet 2.
+Remove the pattr persistence layer entirely. UI elements with `parameter_enable: 1` are the sole source of truth for persistence and initial state. The JS has no defaults — it receives all state from the UI on load.
 
 ## Changes
 
@@ -34,35 +36,49 @@ Remove the pattr persistence layer entirely. UI elements with `parameter_enable:
 - `getvalueof()` / `setvalueof()` global functions (JSON pattrstorage interface)
 - `initialized` flag and all checks
 - Origin-based pattr conditional routing in `broadcastState()`
-- All `broadcastToPattr()` calls in `handleMaxUICommand()`
+- All `broadcastToPattr()` calls from `handleMaxUICommand()`
+- `bang()` → `init()` handler (no auto-init)
+- `loadbang()` handler
+- JS pushing defaults to UI on init
 
 ### Added
-- `outlet(0, "request_ui_values", 1)` at end of `init()` — triggers UI elements to re-emit persisted values
+- `outlet(0, "request_ui_values", 1)` at end of `init()` — triggers UI re-emission
+- `sendSequencerState()` — sends full state to Max UI (called from OSC handlers, init, setState)
+- `sendSequencerPosition()` — sends only current step (called every tick during playback)
+- `sendTemperatureState()` — sends temperature to Max UI
+- UI feedback in all OSC command handlers (so Max patch reflects external changes)
 
 ### Simplified
-- `broadcastState()` — now just calls `broadcastToOSC()`, no conditional routing
+- `broadcastState()` → just calls `broadcastToOSC()`, no conditional routing
+- `handleMaxUICommand()` → renamed messages (dropped `_ui_` infix), no echo to UI
+- Playback ticks → send position only, not full state dump
 
-## New Startup Sequence
+### Message Naming
+Dropped the `_ui_` infix from inlet 2 messages for cleaner naming:
+- `mute_ui_steps` → `mute_steps`
+- `mute_ui_length` → `mute_length`
+- `mute_ui_division` → `mute_division`
+- `temperature_ui` → `temperature`
+- `temperature_reset_ui` → `temperature_reset`
+- `temperature_shuffle_ui` → `temperature_shuffle`
+
+## Startup Sequence
+
+Initialization is triggered explicitly by `live.thisdevice` (not loadbang):
 
 ```
-1. init() fires                              — Live API ready
-2. Track reference established
-3. checkAndActivateObservers()               — No patterns yet (defaults)
-4. broadcastState('init')                    — Defaults to OSC
-5. outlet(0, "request_ui_values", 1)         — JS requests values
-6. Max patch triggers all UI elements        — They re-emit persisted values
-7. handleMaxUICommand() processes each       — Updates sequencer state
-8. broadcastToOSC() for each                 — Notifies Svelte UI
-9. checkAndActivateObservers() fires         — Activates if patterns non-default
+1. live.thisdevice → init message to JS
+2. Track reference established via Live API
+3. Instrument type detected
+4. Device observer set up
+5. outlet(0, "request_ui_values", 1)     — JS requests values
+6. Max patch bangs all UI elements        — They re-emit persisted values
+7. handleMaxUICommand() processes each   — JS state populated from UI
+8. checkAndActivateObservers() fires     — Activates if patterns non-default
+9. broadcastToOSC() for each            — Svelte gets initial state
 ```
 
-No race condition. No `initialized` flag. No pattr feedback loops.
-
-## Max Patch Changes Required
-
-1. Remove pattr routing objects (`[route pattr_state]`, `[prepend restoreState]`, `[pattr]` objects)
-2. Remove patchcords from old outlet 2
-3. Add `[route request_ui_values]` on outlet 0 to trigger all UI elements to re-emit their values to inlet 2
+No race condition. No defaults. No feedback loops.
 
 ## Consequences
 
@@ -72,12 +88,17 @@ No race condition. No `initialized` flag. No pattr feedback loops.
 - Removes feedback loop between pattr and JS
 - Single source of truth for persistence (UI elements)
 - Simpler mental model: UI elements persist, JS processes
+- Efficient playback: only position sent per tick, not full state
+- Bidirectional sync: OSC changes update Max UI, Max UI changes broadcast to OSC
 
 ### Negative
 - Existing Live Sets with pattr data will ignore that data on load (UI element values win, which were always correct)
-- Max patch must be updated to handle `request_ui_values` trigger
+- Max patch must be updated to handle `request_ui_values` and route outlet 0 messages to UI elements
 
 ### Neutral
 - OSC `set/state` command still works via `setState()` (no pattr involvement)
 - `getState()` debugging utility retained
 - Origin tags on OSC broadcasts retained for frontend echo filtering
+
+### Known Issue
+The Svelte frontend's echo filtering skips all non-position/init broadcasts, which means Max UI changes are never reflected in Svelte. See `docs/api.md` "Echo Filtering" section.

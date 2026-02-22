@@ -10,7 +10,7 @@ Permute is a Max4Live device that provides mute sequencing, pitch sequencing, an
 
 | File | Purpose |
 |------|---------|
-| `permute-device.js` | Main controller (~1766 lines) - SequencerDevice, Max handlers |
+| `permute-device.js` | Main controller - SequencerDevice, Max handlers |
 | `permute-constants.js` | Constants, TRANSPOSE_CONFIG, VALUE_TYPES |
 | `permute-utils.js` | Debug, error handling, LiveAPI helpers |
 | `permute-sequencer.js` | Generic Sequencer class (pattern/timing) |
@@ -22,22 +22,47 @@ Permute is a Max4Live device that provides mute sequencing, pitch sequencing, an
 | `permute-temperature.js` | Temperature mixin (applied to SequencerDevice prototype) |
 | `Permute.amxd` | Max4Live device file (load this in Ableton) |
 | `Permute.maxpat` | Max patch (UI and routing) |
-| `README.md` | User-facing documentation |
-| `docs/api.md` | OSC command and broadcast reference |
-| `docs/extraction-plan.md` | Extraction plan from Looping |
+| `docs/api.md` | **Complete communication reference** — messaging, data flows, echo filtering |
 | `docs/adr/` | Architecture decision records |
-| `docs/reference/` | Historical ADRs from Looping repo |
+
+## Communication Architecture
+
+See `docs/api.md` for the complete reference. Summary:
+
+### JS Interface: 3 Inlets, 2 Outlets
+
+| Port | Purpose | Messages |
+|------|---------|----------|
+| Inlet 0 | Transport | `song_time <ticks>` |
+| Inlet 1 | OSC commands | `/looping/sequencer/*` |
+| Inlet 2 | Max UI values | `mute_steps`, `mute_length`, `mute_division`, `temperature`, etc. |
+| Outlet 0 | UI feedback | `mute_step_0`..`7`, `mute_current`, `mute_length`, `mute_division`, `temperature`, `request_ui_values` |
+| Outlet 1 | OSC broadcast | `state_broadcast` (29-arg flat format) |
+
+### Data Flow Rules
+
+- **Max UI changes** → JS updates state → broadcasts to OSC only (no echo to UI)
+- **OSC changes** → JS updates state → sends to Max UI AND broadcasts to OSC
+- **Transport ticks** → JS sends position only (`mute_current`, `pitch_current`) — no full state resend
+
+## Initialization
+
+Triggered explicitly by `live.thisdevice` (NOT loadbang/bang). JS has no defaults — UI elements are the source of truth.
+
+```
+live.thisdevice → init → track setup → request_ui_values → UI re-emits → JS state populated
+```
+
+See `docs/adr/006-remove-pattr-ui-source-of-truth.md`.
 
 ## Architecture
 
 ### Delta-Based State Tracking (v3.0)
 
-The device tracks `lastValues` per clip and applies deltas only on change:
+Tracks `lastValues` per clip, applies deltas only on change:
 - `0→1`: Apply transformation (shift up, mute)
 - `1→0`: Reverse transformation (shift down, unmute)
 - `0→0` or `1→1`: No action
-
-This eliminated ~30% of code compared to the previous pristine-state approach.
 
 ### Key Classes
 
@@ -47,17 +72,9 @@ This eliminated ~30% of code compared to the previous pristine-state approach.
 - `ObserverRegistry` - Centralized Live API observer management
 - `CommandRegistry` - Message dispatch pattern
 
-### Initialization Lifecycle
-
-`init()` establishes the track reference, detects instrument type, sets up observers, then sends `request_ui_values` via outlet 0. The Max patch responds by triggering all UI elements to re-emit their persisted values to inlet 2, which `handleMaxUICommand()` processes normally. State persistence is handled entirely by UI elements with `parameter_enable: 1`. See `docs/adr/006-remove-pattr-ui-source-of-truth.md`.
-
-### Modular Architecture
-
-Code is split into 10 CommonJS modules (flat directory, Max4Live constraint). Temperature methods use a mixin pattern applied to `SequencerDevice.prototype`. See `docs/adr/004-modularization.md`.
-
 ### Lazy Observer Activation (v6.0)
 
-Transport and time signature observers are only created when a sequencer becomes active (pattern has non-default values). This reduces CPU overhead for idle devices.
+Transport and time signature observers are only created when a sequencer becomes active (pattern has non-default values). Reduces CPU overhead for idle devices.
 
 ### Temperature Transformation (v3.1)
 
@@ -65,25 +82,6 @@ Uses note ID tracking for reversible pitch swapping:
 - Captures original pitches by `note_id` when temp goes 0→>0
 - Restores original pitches when temp goes >0→0
 - Handles overdubbing (new notes preserved) and deletion gracefully
-
-## OSC Namespace
-
-All messages use `/looping/sequencer/` prefix (retained for Looping compatibility).
-
-Key addresses:
-- `/looping/sequencer/mute/step` - Toggle mute step
-- `/looping/sequencer/pitch/step` - Toggle pitch step
-- `/looping/sequencer/temperature` - Set temperature
-- `/looping/sequencer/set/state` - Full state sync
-- `/looping/sequencer/state` - Broadcast (output)
-
-See `docs/api.md` for complete reference.
-
-## State Broadcast Format
-
-29 arguments: `[trackIndex, origin, mutePattern[8], muteLength, muteDivision[3], mutePosition, pitchPattern[8], pitchLength, pitchDivision[3], pitchPosition, temperature]`
-
-Origin tags enable echo filtering - see `docs/api.md` for details.
 
 ## Common Development Tasks
 
@@ -101,37 +99,27 @@ var DEBUG_MODE = true;
 
 ### Add New OSC Command
 1. Add handler in `setupCommandHandlers()` method
-2. Add global function to expose it to Max
-3. Update `docs/api.md` with new command
-
-### Modify State Broadcast
-1. Update `broadcastState()` / `broadcastToOSC()` methods
-2. Update `docs/api.md` format table
+2. Add `sendSequencerState()` / `sendTemperatureState()` call for UI feedback
+3. Update `docs/api.md`
 
 ## Documentation Maintenance
 
-When making changes, update these docs as needed:
-
 | Change Type | Update |
 |-------------|--------|
-| New feature | README.md, docs/api.md if OSC involved |
-| API change | docs/api.md |
-| Architecture change | Create new ADR in docs/adr/ |
-| Bug fix | CHANGELOG.md (when created) |
-
-## Origin
-
-Extracted from the Looping repository. See:
-- `docs/adr/001-extraction-from-looping.md` - Extraction decision
-- `docs/extraction-plan.md` - Detailed extraction plan
-- `docs/reference/` - Original ADRs from Looping
+| Messaging change | `docs/api.md` |
+| Architecture change | Create new ADR in `docs/adr/` |
+| API change | `docs/api.md` |
 
 ## Instrument Detection
 
-The device scans for transpose parameters by name (case-insensitive):
+Scans for transpose parameters by name (case-insensitive):
 1. "custom e" (shift: 21)
 2. "pitch" (shift: 16)
 3. "transpose" (shift: 16)
 4. "octave" (shift: 16)
 
 If found, uses parameter-based shifting. Otherwise, modifies note pitches directly.
+
+## Known Issue: Svelte Echo Filtering
+
+The Svelte frontend currently skips ALL non-position/init broadcasts, which means changes from the Max UI are never reflected in Svelte. See `docs/api.md` "Echo Filtering" section for the problem description and recommended fixes.

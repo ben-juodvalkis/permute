@@ -1,243 +1,334 @@
-# Permute API Reference
+# Permute Communication Reference
 
-Permute communicates via OSC (Open Sound Control) for external control and state synchronization.
+Permute is a Max4Live device with three communication interfaces:
 
-## OSC Namespace
-
-All Permute OSC messages use the `/looping/sequencer/` namespace prefix.
-
-> **Note:** The namespace retains "looping" for backward compatibility with the Looping project. This may become configurable in a future version.
+1. **OSC** — bidirectional communication with external UIs (e.g., Svelte frontend)
+2. **Max UI** — bidirectional communication between JS engine and Max patch UI elements
+3. **Transport** — receives song position ticks from Ableton's transport
 
 ---
 
-## Input Commands
+## Architecture Overview
 
-Commands sent TO Permute to control the device. All commands include `deviceId` as the first argument for multi-device filtering.
+```
+                        ┌─────────────────────────┐
+   Ableton Transport ──►│ Inlet 0: song_time       │
+                        │                         │
+   OSC Bridge ─────────►│ Inlet 1: OSC commands    │
+                        │                         │
+   Max UI elements ────►│ Inlet 2: UI values       │
+                        │                         │
+                        │         JS Engine        │
+                        │                         │
+   Max UI elements ◄────│ Outlet 0: UI feedback    │
+                        │                         │
+   OSC Bridge ◄─────────│ Outlet 1: state_broadcast│
+                        └─────────────────────────┘
+```
+
+### Three Sources Can Change State
+
+| Source | Inlet | What happens |
+|--------|-------|-------------|
+| Max UI (user clicks button/dial) | Inlet 2 | JS updates state → broadcasts to OSC (outlet 1) |
+| OSC command (Svelte sends command) | Inlet 1 | JS updates state → sends to Max UI (outlet 0) → broadcasts to OSC (outlet 1) |
+| Transport tick | Inlet 0 | JS advances position → sends position to Max UI (outlet 0) → broadcasts to OSC (outlet 1) |
+
+**Key rule:** When the Max UI is the source, JS does NOT echo back to the UI (it already shows the correct value). When OSC is the source, JS DOES send to the UI (so the Max patch reflects the change).
+
+---
+
+## OSC Input Commands (Inlet 1)
+
+Commands sent TO Permute from an external UI. All commands include `deviceId` as the first argument for multi-device filtering.
 
 ### Mute Sequencer
 
-#### Set Step
 ```
 /looping/sequencer/mute/step [deviceId, stepIndex, value]
 ```
-Toggle a single mute step.
-- `deviceId`: Integer - Live API device ID
-- `stepIndex`: Integer 0-7 - Step to modify
-- `value`: Integer 0 or 1 - Mute state (0=muted, 1=unmuted)
+- `stepIndex`: Integer 0-7
+- `value`: Integer 0 or 1 (0=muted, 1=unmuted)
 
-#### Set Length
 ```
 /looping/sequencer/mute/length [deviceId, length]
 ```
-Set pattern length.
-- `length`: Integer 1-64
+- `length`: Integer 1-8
 
-#### Set Rate
 ```
 /looping/sequencer/mute/rate [deviceId, bars, beats, ticks]
 ```
-Set timing division in bar.beat.tick format.
-- `bars`: Integer - Bars per step
-- `beats`: Integer - Beats per step
-- `ticks`: Integer - Ticks per step (480 ticks = 1 quarter note)
-
-**Common divisions:**
-| Division | bars | beats | ticks |
-|----------|------|-------|-------|
-| 1 bar | 1 | 0 | 0 |
-| 1 beat | 0 | 1 | 0 |
-| 1/8 note | 0 | 0 | 240 |
-| 1/16 note | 0 | 0 | 120 |
+- Division in bars.beats.ticks format (see Timing section)
 
 ### Pitch Sequencer
 
-#### Set Step
 ```
 /looping/sequencer/pitch/step [deviceId, stepIndex, value]
-```
-Toggle a single pitch step.
-- `value`: Integer 0 or 1 - Pitch state (0=original, 1=octave up)
-
-#### Set Length
-```
 /looping/sequencer/pitch/length [deviceId, length]
-```
-
-#### Set Rate
-```
 /looping/sequencer/pitch/rate [deviceId, bars, beats, ticks]
 ```
+Same format as mute.
 
 ### Temperature
 
 ```
 /looping/sequencer/temperature [deviceId, value]
 ```
-Set temperature for organic variation.
 - `value`: Float 0.0-1.0
 
 ### Complete State
 
 ```
-/looping/sequencer/set/state [deviceId, ...state]
+/looping/sequencer/set/state [deviceId, ...26 args]
 ```
-Set complete device state in one message. Used for ghost editing sync.
+Sets everything at once. Used for ghost editing sync.
 
-**Arguments (26 total):**
 | Index | Field |
 |-------|-------|
 | 0 | deviceId |
 | 1-8 | mutePattern[8] |
 | 9 | muteLength |
-| 10 | muteBars |
-| 11 | muteBeats |
-| 12 | muteTicks |
+| 10-12 | muteDivision [bars, beats, ticks] |
 | 13-20 | pitchPattern[8] |
 | 21 | pitchLength |
-| 22 | pitchBars |
-| 23 | pitchBeats |
-| 24 | pitchTicks |
+| 22-24 | pitchDivision [bars, beats, ticks] |
 | 25 | temperature |
 
 ---
 
-## Output Broadcasts
+## OSC Output Broadcast (Outlet 1)
 
-Messages sent FROM Permute for state synchronization.
-
-### State Broadcast
+One message type, sent whenever state changes:
 
 ```
-/looping/sequencer/state [trackIndex, origin, ...state]
+/looping/sequencer/state [trackIndex, origin, ...27 state values]
 ```
 
-Broadcast whenever state changes. Enables multi-track displays and UI synchronization.
+**Format (29 arguments total):**
 
-**Format (29 arguments):**
-
-| Index | Field | Description |
-|-------|-------|-------------|
-| 0 | trackIndex | Track index in Ableton (0-based) |
-| 1 | origin | Why this broadcast occurred |
-| 2-9 | mutePattern[8] | 8 binary values (0=muted, 1=unmuted) |
-| 10 | muteLength | Pattern length (1-64) |
-| 11-13 | muteDivision | [bars, beats, ticks] |
-| 14 | mutePosition | Current step (0-based) |
-| 15-22 | pitchPattern[8] | 8 binary values (0=original, 1=octave up) |
-| 23 | pitchLength | Pattern length (1-64) |
-| 24-26 | pitchDivision | [bars, beats, ticks] |
-| 27 | pitchPosition | Current step (0-based) |
-| 28 | temperature | Temperature value (0.0-1.0) |
+| Index | Field | Type |
+|-------|-------|------|
+| 0 | trackIndex | Integer (0-based track index in Ableton) |
+| 1 | origin | String (see Origin Values below) |
+| 2-9 | mutePattern[8] | 8 integers (0=muted, 1=unmuted) |
+| 10 | muteLength | Integer (1-8) |
+| 11-13 | muteDivision | 3 integers [bars, beats, ticks] |
+| 14 | mutePosition | Integer (-1=idle, 0-7=current step) |
+| 15-22 | pitchPattern[8] | 8 integers (0=original, 1=octave up) |
+| 23 | pitchLength | Integer (1-8) |
+| 24-26 | pitchDivision | 3 integers [bars, beats, ticks] |
+| 27 | pitchPosition | Integer (-1=idle, 0-7=current step) |
+| 28 | temperature | Float (0.0-1.0) |
 
 ### Origin Values
 
-The `origin` field indicates why the broadcast occurred:
+The `origin` field tells the frontend WHY this broadcast occurred:
 
-| Origin | Description | Typical Frontend Action |
-|--------|-------------|------------------------|
-| `init` | Device just initialized | Apply full state |
-| `set_state_ack` | Echo of set/state command | Skip (it's an echo) |
-| `mute_step` | Mute step changed | Skip (echo) |
-| `pitch_step` | Pitch step changed | Skip (echo) |
-| `mute_length` | Mute length changed | Skip (echo) |
-| `pitch_length` | Pitch length changed | Skip (echo) |
-| `mute_rate` | Mute rate changed | Skip (echo) |
-| `pitch_rate` | Pitch rate changed | Skip (echo) |
-| `temperature` | Temperature changed | Skip (echo) |
-| `position` | Playhead position update | Update positions only |
-| `unknown` | Fallback | Apply full state |
+| Origin | Trigger | Description |
+|--------|---------|-------------|
+| `init` | Device initialized | First broadcast after load — not currently sent (see note) |
+| `mute_step` | OSC mute/step command | A mute step was toggled via OSC |
+| `mute_length` | OSC mute/length command | Mute length changed via OSC |
+| `mute_rate` | OSC mute/rate OR Max UI | Mute division changed |
+| `mute_pattern` | Max UI mute_steps | Mute pattern changed via Max UI |
+| `pitch_step` | OSC pitch/step command | A pitch step was toggled via OSC |
+| `pitch_length` | OSC pitch/length command | Pitch length changed via OSC |
+| `pitch_rate` | OSC pitch/rate OR Max UI | Pitch division changed |
+| `pitch_pattern` | Max UI pitch_steps | Pitch pattern changed via Max UI |
+| `temperature` | OSC or Max UI temperature | Temperature changed |
+| `position` | Transport tick | Playhead moved to a new step |
+| `set_state_ack` | OSC set/state command | Acknowledgment of full state set |
+| `unknown` | Fallback | Should not normally occur |
 
-**Echo Filtering:**
+### Echo Filtering — IMPORTANT
 
-When the frontend sends a command (e.g., toggle mute step), Permute broadcasts the new state with an origin tag. The frontend should skip these "echo" broadcasts since it already has the correct local state. This prevents:
-- UI flicker from round-trip updates
-- Race conditions during rapid edits
-- Stale state overwriting pending changes
+**The current origin-based echo filtering is broken.** Here's why:
+
+State can change from TWO sources: the Svelte UI (via OSC) or the Max UI (physical dials/buttons). Both produce the same origin tags. For example:
+
+- User clicks a mute step in **Svelte** → OSC command → JS broadcasts with origin `mute_step`
+- User clicks a mute step in **Max** → inlet 2 → JS broadcasts with origin `mute_pattern`
+
+The Svelte frontend currently skips ALL broadcasts that aren't `init`, `position`, or `unknown`. This means **changes made from the Max UI are never reflected in Svelte**.
+
+**Correct approach:** The frontend should only skip a broadcast if IT was the source. Options:
+
+1. **Timestamp-based:** Track when Svelte last sent each command type. Only skip broadcasts that arrive within ~100ms of a sent command with matching origin.
+2. **Sequence number:** Add a sequence number to commands and broadcasts. Frontend includes seq# in its command; broadcast echoes it back. Frontend skips only broadcasts matching its own seq#.
+3. **Always apply:** Accept all broadcasts and use them as the source of truth. This is simplest but may cause UI flicker during rapid edits.
+
+Option 1 (timestamp-based) is recommended — it's simple and handles the common case well.
 
 ---
 
-## Max Patch Integration
+## Max UI Messages (Inlet 2 / Outlet 0)
 
-### Internal Messages
+These messages flow between the JS engine and Max patch UI elements.
 
-These messages are routed internally within the Max patch:
+### Inlet 2: Max UI → JS
 
-#### Song Time
+Sent when user interacts with Max UI elements, or when UI elements re-emit persisted values on load.
+
+| Message | Format | Example |
+|---------|--------|---------|
+| `mute_steps` | `mute_steps <v0> <v1> ... <v7>` | `mute_steps 1 0 1 0 1 1 0 0` |
+| `mute_length` | `mute_length <length>` | `mute_length 4` |
+| `mute_division` | `mute_division <bars> <beats> <ticks>` | `mute_division 0 0 120` |
+| `pitch_steps` | `pitch_steps <v0> <v1> ... <v7>` | `pitch_steps 0 0 1 0 0 1 0 0` |
+| `pitch_length` | `pitch_length <length>` | `pitch_length 8` |
+| `pitch_division` | `pitch_division <bars> <beats> <ticks>` | `pitch_division 0 1 0` |
+| `temperature` | `temperature <value>` | `temperature 0.5` |
+| `temperature_reset` | `temperature_reset` | `temperature_reset` |
+| `temperature_shuffle` | `temperature_shuffle` | `temperature_shuffle` |
+
+### Outlet 0: JS → Max UI
+
+Sent when state changes from OSC or during playback. NOT sent when the change came from Max UI (no echo).
+
+| Message | Format | When sent |
+|---------|--------|-----------|
+| `mute_step_0` ... `mute_step_7` | `mute_step_<n> <value:int>` | OSC changes a step |
+| `mute_length` | `mute_length <length:int>` | OSC changes length |
+| `mute_division` | `mute_division <bars> <beats> <ticks>` | OSC changes rate |
+| `mute_current` | `mute_current <step:int>` | Every tick during playback (-1=idle) |
+| `mute_active` | `mute_active <0\|1>` | When pattern becomes active/inactive |
+| `pitch_step_0` ... `pitch_step_7` | `pitch_step_<n> <value:int>` | OSC changes a step |
+| `pitch_length` | `pitch_length <length:int>` | OSC changes length |
+| `pitch_division` | `pitch_division <bars> <beats> <ticks>` | OSC changes rate |
+| `pitch_current` | `pitch_current <step:int>` | Every tick during playback (-1=idle) |
+| `pitch_active` | `pitch_active <0\|1>` | When pattern becomes active/inactive |
+| `temperature` | `temperature <value:float>` | OSC changes temperature |
+| `request_ui_values` | `request_ui_values 1` | After init() — triggers UI re-emission |
+
+**Note:** `mute_length`, `mute_division`, `pitch_length`, `pitch_division`, and `temperature` use the same message name in both directions. The JS knows direction by inlet vs outlet.
+
+---
+
+## Initialization
+
+Initialization is triggered explicitly by `live.thisdevice` sending an `init` message (NOT by loadbang or bang).
+
+### Startup Sequence
+
 ```
-song_time [ticks]
+1. live.thisdevice fires → sends "init" to JS
+2. init() establishes track reference via Live API
+3. init() detects instrument type (for pitch transformation)
+4. init() sets up device observer
+5. init() sends "request_ui_values 1" on outlet 0
+6. Max patch routes request_ui_values → [defer] → bangs all UI elements
+7. UI elements re-emit persisted values → flow into inlet 2
+8. handleMaxUICommand() processes each value → JS state matches UI
+9. setPattern() triggers checkAndActivateObservers() → transport observers created if needed
+10. broadcastToOSC() for each value → Svelte gets initial state
 ```
-Sent every 16th note with absolute tick position. Drives both mute and pitch sequencers from a single time source.
 
-#### Direct Commands
-```
-mute pattern 1 0 1 0 1 0 1 0
-mute division 0 0 120
-mute step 3 0
-mute length 16
-mute reset
-
-pitch pattern 0 0 1 0 0 1 0 0
-pitch division 1 0 0
-pitch step 2 1
-pitch length 8
-pitch reset
-
-temperature 0.7
-temperature_reset
-temperature_shuffle
-```
+**UI elements are the source of truth for persistence.** They auto-persist via `parameter_enable: 1`. The JS has no defaults — it receives all initial state from the UI.
 
 ### State Persistence
 
-State is persisted via Max UI elements with `parameter_enable: 1`. On device load, `init()` sends `request_ui_values` to trigger UI elements to re-emit their values to the JS.
+Max UI elements with `parameter_enable: 1` automatically save/restore with the Ableton Live Set. On device load:
+
+1. Ableton restores UI element values from the saved Live Set
+2. `live.thisdevice` triggers `init`
+3. JS requests UI values via `request_ui_values`
+4. UI elements emit their restored values
+5. JS state is populated from these values
+
+No pattr. No JSON serialization. No race conditions.
 
 ---
 
-## Timing
+## Transport (Inlet 0)
 
-### Tick Resolution
+```
+song_time <ticks:float>
+```
 
-Ableton uses 480 ticks per quarter note. Common step divisions:
+Sent every 16th note (120 ticks) by `[metro] → [transport] → [prepend song_time]`. The JS applies a 120-tick lookahead internally.
 
-| Musical Value | Ticks |
-|--------------|-------|
-| Whole note | 1920 |
-| Half note | 960 |
-| Quarter note | 480 |
-| 8th note | 240 |
-| 16th note | 120 |
-| 32nd note | 60 |
-
-### Lookahead
-
-Permute applies a 120-tick (1 sixteenth note) lookahead to compensate for Live API processing latency. Transformations are applied slightly ahead of when the audio actually plays.
+During playback, position updates are efficient:
+- JS sends only `mute_current <step>` and `pitch_current <step>` to outlet 0
+- JS sends full `state_broadcast` to outlet 1 (OSC) with origin `position`
+- No pattern/length/division data is resent on each tick
 
 ---
 
-## Examples
+## Timing Reference
 
-### Classic Trance Gate
+Ableton uses 480 ticks per quarter note.
+
+| Musical Value | bars | beats | ticks | Total ticks |
+|--------------|------|-------|-------|-------------|
+| 2 bars | 2 | 0 | 0 | 3840 |
+| 1 bar | 1 | 0 | 0 | 1920 |
+| 1/2 note | 0 | 2 | 0 | 960 |
+| 1 beat | 0 | 1 | 0 | 480 |
+| 1/8 note | 0 | 0 | 240 | 240 |
+| 1/16 note | 0 | 0 | 120 | 120 |
+| 1/32 note | 0 | 0 | 60 | 60 |
+
+(Total ticks assumes 4/4 time signature)
+
+---
+
+## Data Flow Diagrams
+
+### User changes mute step in Svelte UI
+
 ```
-/looping/sequencer/mute/step [deviceId, 2, 0]  // Mute step 2
-/looping/sequencer/mute/step [deviceId, 5, 0]  // Mute step 5
-/looping/sequencer/mute/rate [deviceId, 0, 0, 120]  // 16th notes
+Svelte → /looping/sequencer/mute/step [deviceId, 3, 0]
+  → Inlet 1 → handleOSCCommand()
+    → sequencer.setStep(3, 0)
+    → sendSequencerState('mute')     → Outlet 0 → Max UI updates
+    → broadcastState('mute_step')    → Outlet 1 → /looping/sequencer/state
+                                                    (Svelte should SKIP — it was the source)
 ```
 
-### Octave Jump Pattern
+### User changes mute step in Max UI
+
 ```
-/looping/sequencer/pitch/step [deviceId, 4, 1]  // Octave up on step 4
-/looping/sequencer/pitch/step [deviceId, 5, 1]
-/looping/sequencer/pitch/step [deviceId, 6, 1]
-/looping/sequencer/pitch/step [deviceId, 7, 1]
-/looping/sequencer/pitch/rate [deviceId, 0, 1, 0]  // Quarter notes
+Max live.text button → [i] → [join 8] → [prepend mute_steps] → Inlet 2
+  → handleMaxUICommand('mute_steps', [1,0,1,0,1,1,0,0])
+    → sequencer.setPattern([1,0,1,0,1,1,0,0])
+    → broadcastToOSC('mute_pattern')  → Outlet 1 → /looping/sequencer/state
+                                                     (Svelte should APPLY — Max was the source)
+    → (NO outlet 0 — Max UI already shows correct value)
 ```
 
-### Organic Variation
+### OSC changes temperature
+
 ```
-/looping/sequencer/temperature [deviceId, 0.5]  // Medium variation
+Svelte → /looping/sequencer/temperature [deviceId, 0.5]
+  → Inlet 1 → handleOSCCommand()
+    → setTemperatureValue(0.5)
+    → sendTemperatureState()          → Outlet 0 → Max UI dial updates
+    → broadcastState('temperature')   → Outlet 1 → /looping/sequencer/state
+                                                     (Svelte should SKIP — it was the source)
 ```
 
-### Full State Sync
+### Max UI changes temperature
+
 ```
-/looping/sequencer/set/state [deviceId, 1,0,1,0,1,1,1,1, 8, 0,0,120, 0,0,0,0,1,1,1,1, 8, 0,1,0, 0.3]
+Max live.dial → [prepend temperature] → Inlet 2
+  → handleMaxUICommand('temperature', [0.5])
+    → setTemperatureValue(0.5)
+    → broadcastToOSC('temperature')   → Outlet 1 → /looping/sequencer/state
+                                                     (Svelte should APPLY — Max was the source)
+    → (NO outlet 0 — Max UI already shows correct value)
+```
+
+### Transport tick (playback)
+
+```
+[metro] → [transport] → [prepend song_time] → Inlet 0
+  → handleTransport('song_time', [1920.0])
+    → processSequencerTick('mute', 2040)  (with 120-tick lookahead)
+      → seq.currentStep = 1
+      → apply mute transformation to clip
+      → sendSequencerPosition('mute')
+        → outlet 0: mute_current 1     → Max UI step indicator
+        → outlet 1: state_broadcast     → Svelte position update
+    → processSequencerTick('pitch', 2040)
+      → (same pattern)
 ```

@@ -8,54 +8,79 @@
 
 ## Goal
 
-Remove the pattr persistence layer and rely on Max UI elements with `parameter_enable: 1` for state persistence. This eliminates triple-state synchronization, the startup race condition, and ~100 lines of defensive code.
+Remove the pattr persistence layer, simplify messaging, and make UI elements the sole source of truth for state and persistence.
 
 ---
 
 ## Completed
 
-### JS Changes (permute-device.js)
+### Phase 1: pattr Removal (JS)
 
 - [x] Changed `outlets = 3` to `outlets = 2` (removed pattr outlet)
-- [x] Removed `this.initialized` flag (constructor, init, restoreState, setvalueof)
-- [x] Removed `broadcastToPattr()` function
-- [x] Removed `restoreState()` global function (28-arg pattr parser)
-- [x] Removed `getvalueof()` / `setvalueof()` global functions
+- [x] Removed `this.initialized` flag
+- [x] Removed `broadcastToPattr()`, `restoreState()`, `getvalueof()`, `setvalueof()`
 - [x] Simplified `broadcastState()` — now just calls `broadcastToOSC()`
-- [x] Removed 5x `this.broadcastToPattr()` calls from `handleMaxUICommand()`
 - [x] Added `outlet(0, "request_ui_values", 1)` at end of `init()`
-- [x] Updated all JSDoc and comments referencing pattr
+
+### Phase 2: Simplified Messaging
+
+- [x] Renamed inlet 2 messages: dropped `_ui_` infix (`mute_ui_steps` → `mute_steps`, etc.)
+- [x] Renamed temperature messages: `temperature_ui` → `temperature`, `temperature_reset_ui` → `temperature_reset`, `temperature_shuffle_ui` → `temperature_shuffle`
+- [x] Added `mute_length`, `mute_division`, `pitch_length`, `pitch_division` output on outlet 0
+- [x] Added `temperature` output on outlet 0 (`sendTemperatureState()`)
+- [x] OSC command handlers now send UI feedback via `sendSequencerState()` / `sendTemperatureState()`
+
+### Phase 3: Efficient Feedback
+
+- [x] Split feedback: `sendSequencerPosition()` (position only, every tick) vs `sendSequencerState()` (full state, on change only)
+- [x] Transport tick only sends `mute_current` / `pitch_current` — no pattern/length/division resend
+- [x] Max UI commands don't echo back to UI (UI already shows correct value)
+- [x] OSC commands DO update UI (Max needs to reflect external changes)
+- [x] Skip-if-unchanged guards on division handler (prevents feedback loops)
+
+### Phase 4: UI as Source of Truth
+
+- [x] Removed JS defaults being pushed to UI on init
+- [x] Removed `bang()` → `init()` handler (no auto-init)
+- [x] Removed empty `loadbang()` handler
+- [x] `init()` now triggered explicitly by `live.thisdevice`
+- [x] `init()` only sets up track ref + observers, then requests UI values
 
 ### Documentation
 
-- [x] Created ADR-006: `docs/adr/006-remove-pattr-ui-source-of-truth.md`
-- [x] Updated `docs/api.md` — removed pattr_restore origin, updated persistence section
-- [x] Updated `CLAUDE.md` — updated initialization lifecycle, removed pattr references
+- [x] Created ADR-006
+- [x] Rewrote `docs/api.md` as complete communication reference with data flow diagrams
+- [x] Documented echo filtering problem for Svelte frontend
 
 ---
 
-## Remaining: Max Patch Wiring
+## Remaining
 
-The Max patch needs to be rewired to match the JS's 3-inlet / 2-outlet architecture. See the complete wiring reference with diagrams and message formats:
+### Max Patch Wiring
 
-**Wiring reference:** `.claude/plans/dazzling-leaping-neumann.md`
+- [ ] Wire transport chain to inlet 0
+- [ ] Wire OSC bridge to inlet 1
+- [ ] Rename prepends to `mute_steps`, `mute_length`, `mute_division` (no `_ui_` infix) and wire to inlet 2
+- [ ] Same for pitch: `pitch_steps`, `pitch_length`, `pitch_division`
+- [ ] Wire `[prepend temperature]` to inlet 2
+- [ ] Add `[route request_ui_values]` → `[defer]` → bang UI elements on outlet 0
+- [ ] Route `mute_step_0`..`mute_step_7` from outlet 0 to `live.text` buttons
+- [ ] Route `mute_length`, `mute_division` from outlet 0 to `live.dial` elements
+- [ ] Same for pitch on outlet 0
+- [ ] Route `temperature` from outlet 0 to temperature dial
+- [ ] Route `state_broadcast` from outlet 1 to OSC bridge
+- [ ] Connect `live.thisdevice` to send `init` to JS
 
-Key tasks:
-- [ ] Wire transport chain (metro → transport → prepend song_time) to **inlet 0**
-- [ ] Wire OSC bridge to **inlet 1**
-- [ ] Rename prepends to `mute_ui_steps`, `mute_ui_length`, `mute_ui_division` and wire to **inlet 2**
-- [ ] Add `[i]` objects between `live.text` buttons and `join` (for re-emission)
-- [ ] Add `[route request_ui_values]` → `[defer]` → `[t b b b]` on **outlet 0** to bang UI elements on load
-- [ ] Wire `[route state_broadcast]` on **outlet 1** to OSC bridge
-- [ ] Add pitch UI elements (same pattern as mute with `pitch_ui_*` prefixes)
-- [ ] Verify temperature dial has `parameter_enable: 1` and wires through `[prepend temperature_ui]` to inlet 2
+### Svelte Echo Filtering Fix
 
----
+The Svelte frontend currently skips ALL non-position/init broadcasts. This means changes from the Max UI are never reflected in Svelte. The frontend needs smarter echo filtering — see `docs/api.md` "Echo Filtering" section for recommended approaches.
 
-## Verification Checklist
+### Verification
 
-- [ ] Save/load test: non-default patterns + temperature persist across Live Set save/load
-- [ ] OSC round-trip: OSC changes reflect in Max UI; UI changes broadcast via OSC
-- [ ] Transport test: start/stop with active patterns works correctly
-- [ ] Temperature test: temperature > 0 persists and note swaps function
-- [ ] Multiple devices: independent persistence for 2+ Permute devices
+- [ ] Save/load: non-default patterns + temperature persist across Live Set save/load
+- [ ] OSC → Max UI: OSC commands update Max UI elements
+- [ ] Max UI → OSC: Max UI changes broadcast to Svelte
+- [ ] Svelte → Max UI: Svelte commands update Max UI elements
+- [ ] Transport: start/stop with active patterns works correctly
+- [ ] Temperature: persists and note swaps function
+- [ ] Multiple devices: independent persistence

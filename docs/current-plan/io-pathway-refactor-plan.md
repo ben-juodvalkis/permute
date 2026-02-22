@@ -339,11 +339,11 @@ Max UI commands ───► Inlet 2 ─► handleMaxCommand()          ▼
 | Inlet 1 (OSC) | Yes | Yes | Yes (echo for other listeners) | Yes |
 | Inlet 2 (Max UI) | Yes | No (UI already knows) | Yes | Yes |
 | restoreState (pattr) | Yes | Yes | Yes (origin='pattr_restore') | No (avoid loop) |
-| init | N/A | Yes | Yes (origin='init') | Yes |
+| init | N/A | Yes | Yes (origin='init') | No (prevents defaults overwriting saved state) |
 
 #### Tasks
 
-- [ ] **3.1** Update inlet definition
+- [x] **3.1** Update inlet definition
   ```javascript
   inlets = 3;
   // Inlet 0: Transport (song_time)
@@ -351,7 +351,7 @@ Max UI commands ───► Inlet 2 ─► handleMaxCommand()          ▼
   // Inlet 2: Max UI commands
   ```
 
-- [ ] **3.2** Implement inlet-aware message handling
+- [x] **3.2** Implement inlet-aware message handling
   ```javascript
   function anything() {
       var args = arrayfromargs(arguments);
@@ -371,20 +371,20 @@ Max UI commands ───► Inlet 2 ─► handleMaxCommand()          ▼
   }
   ```
 
-- [ ] **3.3** Create `handleTransport()`
+- [x] **3.3** Create `handleTransport()`
   - Process `song_time` messages
   - Update sequencer positions
   - Broadcast position to UI (outlet 0) and OSC (outlet 1)
   - Skip pattr (outlet 2)
 
-- [ ] **3.4** Create `handleOSCCommand()`
+- [x] **3.4** Create `handleOSCCommand()`
   - Parse OSC address and route to command handlers
   - Update state
   - Broadcast to UI (outlet 0) - external change, UI needs update
   - Broadcast to OSC (outlet 1) - echo for other listeners
   - Broadcast to pattr (outlet 2) - persistence
 
-- [ ] **3.5** Create `handleMaxUICommand()`
+- [x] **3.5** Create `handleMaxUICommand()`
   - Process direct Max commands (mute step, pitch length, etc.)
   - **Handle "active steps list" format** - Max UI sends `mute_ui_steps 4 7` meaning only steps 4 and 7 are on (see Appendix D)
   - Parse active indices and convert to full pattern array
@@ -395,17 +395,17 @@ Max UI commands ───► Inlet 2 ─► handleMaxCommand()          ▼
   - Broadcast to OSC (outlet 1) - external world needs to know
   - Broadcast to pattr (outlet 2) - persistence
 
-- [ ] **3.6** Simplify origin handling
+- [x] **3.6** Simplify origin handling (no changes needed — origin routing still correct)
   - With inlet-based routing, many origin tags become unnecessary
   - Keep origin for OSC broadcasts (still useful for frontend caching)
   - Remove origin-based conditional routing within JS
 
-- [ ] **3.7** Update Max patch inlet connections
+- [ ] **3.7** Update Max patch inlet connections (Max patch work — see instructions below)
   - Inlet 0 ← Transport messages (song_time from metro)
   - Inlet 1 ← OSC input (via udpreceive → route)
   - Inlet 2 ← Max UI controls (toggles, number boxes, etc.)
 
-- [ ] **3.8** Handle initialization edge cases
+- [x] **3.8** Handle initialization edge cases (no changes needed — named globals fire on any inlet)
   ```javascript
   function init() {
       // Called via loadbang, not through any inlet
@@ -416,7 +416,7 @@ Max UI commands ───► Inlet 2 ─► handleMaxCommand()          ▼
   }
   ```
 
-- [ ] **3.9** Handle restoreState edge cases
+- [x] **3.9** Handle restoreState edge cases (no changes needed — named globals fire on any inlet)
   ```javascript
   function restoreState() {
       // Called via pattr restore, comes through inlet 0 currently
@@ -428,7 +428,7 @@ Max UI commands ───► Inlet 2 ─► handleMaxCommand()          ▼
   }
   ```
 
-- [ ] **3.10** Remove legacy handlers
+- [x] **3.10** Remove legacy handlers
   - Remove `mute()` and `pitch()` global functions (lines 1421-1433) — no longer wired from Max patch after Phase 0.5
   - Remove `handleSequencerMessage()` (line 1024) — no remaining callers
   - Remove legacy command registrations from `setupCommandHandlers()`: `tick`, `pattern`, `step`, `division`, `length`, `reset`, `bypass` (lines 152-207) — unless still needed for OSC backward compat
@@ -545,24 +545,25 @@ This plan does not include time estimates. Each phase should be completed and va
 
 ## Appendix A: Current Code Locations
 
-> **Updated 2026-02-20** — line numbers reflect post-modularization codebase (~1720 lines in `permute-device.js`).
+> **Updated 2026-02-21** — line numbers reflect Phase 3 refactored codebase (~1692 lines in `permute-device.js`).
 
 | Area | File | Lines | Notes |
 |------|------|-------|-------|
-| Inlet/outlet definition | `permute-device.js` | 13-14 | `inlets = 1; outlets = 1;` |
-| Message routing (anything) | `permute-device.js` | 1645-1677 | Filters for `/looping/sequencer/` prefix, delegates to CommandRegistry |
-| Command handlers (setup) | `permute-device.js` | 139-337 | `setupCommandHandlers()` — legacy + OSC handlers |
-| State broadcast | `permute-device.js` | 1220-1300 | `broadcastState()` — sends `state_broadcast` + conditional `pattr_state` |
-| UI feedback (local) | `permute-device.js` | 1155-1170 | `sendSequencerFeedbackLocal()` — step values, position, active flag |
-| UI feedback (+ broadcast) | `permute-device.js` | 1179-1186 | `sendSequencerFeedback()` — calls local + `broadcastState('position')` |
-| pattr restore (flat format) | `permute-device.js` | 1596-1635 | `restoreState()` — 28-arg flat format, delegates to `setState()` |
-| pattr restore (JSON format) | `permute-device.js` | 1701-1713 | `setvalueof()` — JSON from pattrstorage, delegates to `setState()` |
-| Initialization | `permute-device.js` | 345-409 | `SequencerDevice.prototype.init()` |
-| Global Max handlers | `permute-device.js` | 1414-1720 | All `function name()` globals exposed to Max |
-| Legacy mute/pitch handlers | `permute-device.js` | 1421-1433 | `mute()`, `pitch()` → `handleSequencerMessage()` |
-| Temperature globals | `permute-device.js` | 1508-1554 | `temperature()`, `temperature_reset()`, `temperature_shuffle()` |
-| Global instance | `permute-device.js` | 1412 | `var sequencer = new SequencerDevice()` |
-| All `outlet()` calls | `permute-device.js` | 1162, 1166, 1169, 1285, 1298, 1570 | No outlet calls in any module file |
+| Inlet/outlet definition | `permute-device.js` | 13-14 | `inlets = 3; outlets = 3;` |
+| Inlet-aware router (anything) | `permute-device.js` | 1632-1650 | Switches on `inlet` global, delegates to handler methods |
+| handleTransport() | `permute-device.js` | 1280-1288 | Inlet 0 — processes `song_time` |
+| handleOSCCommand() | `permute-device.js` | 1294-1327 | Inlet 1 — parses `/looping/sequencer/` addresses |
+| handleMaxUICommand() | `permute-device.js` | 1330-1432 | Inlet 2 — handles `*_ui_*` messages |
+| Command handlers (setup) | `permute-device.js` | 135-267 | `setupCommandHandlers()` — OSC handlers only |
+| State broadcast | `permute-device.js` | 1119-1269 | `buildStateData()`, `broadcastToOSC()`, `broadcastToPattr()`, `broadcastState()` |
+| UI feedback (local) | `permute-device.js` | 1074-1089 | `sendSequencerFeedbackLocal()` — step values, position, active flag |
+| UI feedback (+ broadcast) | `permute-device.js` | 1098-1105 | `sendSequencerFeedback()` — calls local + `broadcastState('position')` |
+| pattr restore (flat format) | `permute-device.js` | 1576-1614 | `restoreState()` — 28-arg flat format, delegates to `setState()` |
+| pattr restore (JSON format) | `permute-device.js` | 1674-1685 | `setvalueof()` — JSON from pattrstorage, delegates to `setState()` |
+| Initialization | `permute-device.js` | 274-338 | `SequencerDevice.prototype.init()` |
+| Global Max handlers | `permute-device.js` | 1536-1692 | `init()`, `bang()`, `restoreState()`, `anything()`, pattr functions |
+| Global instance | `permute-device.js` | 1527 | `var sequencer = new SequencerDevice()` |
+| All `outlet()` calls | `permute-device.js` | 1081, 1085, 1089, 1215, 1228, 1550 | No outlet calls in any module file |
 
 ## Appendix B: Message Formats
 
@@ -797,3 +798,152 @@ These changes prepare the UI for inlet separation (Phase 3) but work now via `an
 - Feedback loop prevented by Max gate + JS guard
 - Legacy `mute()`/`pitch()` globals and `handleSequencerMessage()` are now dead code (nothing sends to them)
 - **Next:** Phase 3 (inlet separation) or Phase 4 (docs/cleanup)
+
+### 2026-02-21: Phase 3 (JS) Complete
+
+**What was done (all in `permute-device.js`):**
+
+1. **Task 3.1 — Inlet definition** (line 13)
+   - Changed `inlets = 1` → `inlets = 3` (0: Transport, 1: OSC, 2: Max UI)
+
+2. **Tasks 3.2-3.5 — Inlet-aware message routing**
+   - Rewrote `anything()` to switch on `inlet` global, delegating to three new methods:
+     - `handleTransport(messageName, args)` — inlet 0, processes `song_time` via `processWithSongTime()`
+     - `handleOSCCommand(address, args)` — inlet 1, parses `/looping/sequencer/` addresses and routes to CommandRegistry
+     - `handleMaxUICommand(messageName, args)` — inlet 2, handles `mute_ui_steps`, `pitch_ui_steps`, `mute_ui_length`, `pitch_ui_length`, `mute_ui_division`, `pitch_ui_division`, `temperature_ui`, `temperature_reset_ui`, `temperature_shuffle_ui`
+   - These methods are on `SequencerDevice.prototype` (not temporary `anything()` code)
+   - `handleMaxUICommand()` preserves all existing feedback loop guards (unchanged-pattern comparison, unchanged-length comparison)
+
+3. **Task 3.6 — Origin handling**
+   - No changes needed — origin-based routing in `broadcastState()` is still correct and useful
+   - Origin tags remain in OSC broadcasts for frontend caching/dedup
+
+4. **Tasks 3.8-3.9 — Init/restoreState edge cases**
+   - No changes needed — `init()`, `restoreState()`, `setvalueof()` are named global functions that fire regardless of inlet
+   - Their broadcast routing rules (skip pattr for `pattr_restore` and `init`) remain correct
+
+5. **Task 3.10 — Legacy dead code removal**
+   - Removed `mute()` global function (was dead code after Phase 0.5 patch rewire)
+   - Removed `pitch()` global function (same)
+   - Removed `song_time()` global function (now handled by `handleTransport` via `anything()`)
+   - Removed all `seq_*()` global functions: `seq_mute_step`, `seq_mute_length`, `seq_mute_rate`, `seq_pitch_step`, `seq_pitch_length`, `seq_pitch_rate`, `seq_temperature`, `set_state` (now handled by `handleOSCCommand` via `anything()`)
+   - Removed `temperature()`, `temperature_reset()`, `temperature_shuffle()` globals (now handled by `handleMaxUICommand`)
+   - Removed `handleSequencerMessage()` method (no remaining callers)
+   - Removed legacy command registrations: `song_time`, `tick`, `pattern`, `step`, `division`, `length`, `reset`, `bypass` (no remaining callers)
+   - Removed `this.muteSeq` and `this.pitchSeq` legacy references (only used by removed `mute()`/`pitch()` globals)
+
+**What was NOT changed:**
+- `broadcastState()` routing logic (still correct)
+- `broadcastToOSC()`, `broadcastToPattr()`, `buildStateData()` (unchanged)
+- `sendSequencerFeedback()`, `sendSequencerFeedbackLocal()` (unchanged)
+- OSC command handlers in CommandRegistry (`seq_mute_step`, `seq_pitch_step`, etc.) — still used, now called by `handleOSCCommand()`
+- Max patch (.amxd) — **requires inlet rewiring, see instructions below**
+
+**Current state — requires Max patch update:**
+- JS is fully refactored for 3-inlet architecture
+- All messages must arrive on the correct inlet:
+  - Inlet 0: `song_time` (transport)
+  - Inlet 1: `/looping/sequencer/*` (OSC commands)
+  - Inlet 2: `*_ui_*` messages (Max UI controls)
+- Named global functions (`init`, `bang`, `restoreState`, `getvalueof`, `setvalueof`, `notifydeleted`, `clip_changed`) work on any inlet
+- **The Max patch must be rewired (Phase 3) for the JS to receive messages on the correct inlets**
+
+---
+
+## Max Patch Instructions (Phase 3: Inlet Separation)
+
+These changes must be made in Max's patcher editor. Open `Permute.amxd` in Max (via Ableton, click the wrench icon on the device).
+
+### Step 1: Verify v8 object now has 3 inlets and 3 outlets
+
+After saving `permute-device.js`, the `v8 permute-device.js` object should show 3 inlets (left-to-right: transport, OSC, UI) and 3 outlets. If it doesn't update automatically, delete and re-add the v8 object, or close and reopen the device.
+
+### Step 2: Identify current inlet connections
+
+Currently everything connects to the single v8 inlet (inlet 0). You need to identify and reroute:
+
+| Message Source | Current Connection | New Inlet |
+|---|---|---|
+| `song_time` from transport metro | `[s ---tojs]` → `[r ---tojs]` → v8 inlet 0 | Inlet 0 (keep) |
+| OSC commands from `[udpreceive]` | `[r ---tojs]` → v8 inlet 0 | Inlet 1 (move) |
+| Max UI controls (grids, numboxes, dials) | `[s ---tojs]` → `[r ---tojs]` → v8 inlet 0 | Inlet 2 (move) |
+| `init` / `bang` / `loadbang` | Direct or via `[r ---tojs]` → v8 inlet 0 | Inlet 0 (keep — named globals work on any inlet) |
+| pattr restore (`restoreState`) | via `[pattr]` chain → v8 inlet 0 | Inlet 0 (keep — named global works on any inlet) |
+
+### Step 3: Separate the transport path (Inlet 0)
+
+Inlet 0 should receive ONLY transport messages:
+
+**Current:**
+```
+[r ---tojs] ──► v8 inlet 0  (carries everything)
+```
+
+**New:**
+```
+[metro/transport] ──► [prepend song_time] ──► v8 inlet 0  (transport only)
+```
+
+If `song_time` currently goes through `[s ---tojs]` → `[r ---tojs]`, disconnect it from that send/receive chain and connect it directly to v8 inlet 0 instead.
+
+Other messages that should stay on inlet 0 (because they use named global functions):
+- `init` / `bang` / `loadbang` — connect directly to v8 inlet 0
+- `restoreState` — connect pattr restore chain to v8 inlet 0
+
+### Step 4: Create the OSC input path (Inlet 1)
+
+Inlet 1 should receive ONLY OSC commands from `[udpreceive]`:
+
+**New:**
+```
+[udpreceive 11002] ──► [route /looping/sequencer/] ──► ... ──► v8 inlet 1
+```
+
+The `/looping/sequencer/*` messages should be routed to v8 inlet 1 (middle inlet). The JS `handleOSCCommand()` expects the full OSC address as the message name (e.g., `/looping/sequencer/mute/step 42 0 1`).
+
+**Important:** The OSC address must arrive as the message name. If you currently strip it, stop stripping. The messages should arrive at inlet 1 exactly as they come from `[udpreceive]`:
+```
+/looping/sequencer/mute/step 42 0 1
+/looping/sequencer/temperature 42 0.7
+/looping/sequencer/set/state 42 1 1 1 1 1 1 1 1 8 ...
+```
+
+### Step 5: Create the Max UI input path (Inlet 2)
+
+Inlet 2 should receive ONLY `*_ui_*` messages from Max patch UI objects:
+
+**New:**
+```
+[live.grid] ──► [route row] ──► [zl slice 1] ──► [prepend mute_ui_steps] ──► v8 inlet 2
+[live.numbox] ──► [prepend mute_ui_length] ──► v8 inlet 2
+[dial] ──► [prepend temperature_ui] ──► v8 inlet 2
+```
+
+**Option A (recommended): Direct connections**
+Connect each `[prepend *_ui_*]` object's output directly to v8 inlet 2. Remove them from the `[s ---tojs]` send/receive chain.
+
+**Option B: Separate send/receive**
+Create a new send/receive pair (e.g., `[s ---ui_tojs]` → `[r ---ui_tojs]` → v8 inlet 2) and route all UI `[prepend]` objects through it.
+
+### Step 6: Remove the old unified send/receive chain
+
+If `[r ---tojs]` previously connected to v8 inlet 0 and carried all message types, you can now simplify or remove it:
+- If it only carries transport and init messages, keep it connected to inlet 0
+- If UI and OSC messages have been rerouted to inlets 1 and 2, those paths no longer need `[s ---tojs]`
+
+### Step 7: Handle the feedback loop gate
+
+The `[gate]` objects added in Phase 0.5 to prevent grid→v8 feedback loops should continue to work on the new inlet 2 path. Ensure:
+- The gate still sits between the grid output and the `[prepend mute_ui_steps]` → v8 inlet 2 chain
+- The gate open/close signals still come from the v8 outlet 0 UI feedback path
+
+### Step 8: Test
+
+1. **Save the patch**
+2. **Transport:** Play a clip — verify mute/pitch sequencers step through correctly
+3. **UI:** Toggle mute/pitch steps via grid — verify state updates and OSC broadcasts
+4. **OSC:** Send a command via OSC (e.g., `/looping/sequencer/mute/step 42 0 1`) — verify state updates and UI reflects change
+5. **pattr:** Save Live Set, close, reopen — verify state restores correctly
+6. **Temperature:** Turn on temperature dial — verify it works and broadcasts
+7. **Check Max console for errors** — enable `DEBUG_MODE = true` in `permute-utils.js` to see routing info
+8. **Cross-inlet isolation:** Verify that sending a `song_time` message to inlet 1 or 2 does NOT trigger transport processing (it should be silently ignored or logged)

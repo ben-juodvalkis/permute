@@ -203,7 +203,7 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
         //        pitchPattern[8], pitchLength, pitchBars, pitchBeats, pitchTicks, temperature]
         // Total: 26 args (1 + 8 + 1 + 3 + 8 + 1 + 3 + 1)
         debug("set_state", "Received " + args.length + " args, deviceId=" + args[0]);
-        if (args.length < 24) {
+        if (args.length < 26) {
             debug("set_state", "REJECTED: not enough args");
             return;
         }
@@ -232,7 +232,7 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
 
         // Pitch pattern (8 steps)
         var pitchPattern = [];
-        for (var i = 0; i < 8; i++) {
+        for (var j = 0; j < 8; j++) {
             pitchPattern.push(parseInt(args[idx++]));
         }
         self.sequencers.pitchSequencer.setPattern(pitchPattern);
@@ -1342,6 +1342,7 @@ SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
         this.temperatureValue = 0.0;
         this.temperatureActive = false;
         this.clearTemperatureLoopJumpObserver();
+        this.sendTemperatureState();
         this.broadcastToOSC('temperature');
         return;
     }

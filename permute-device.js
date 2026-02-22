@@ -145,57 +145,45 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
 
     // Mute sequencer commands
     this.commandRegistry.register('seq_mute_step', function(args) {
-        // args: [deviceId, stepIndex, value]
         if (args.length < 3 || !isForThisDevice(args[0])) return;
-        var stepIndex = parseInt(args[1]);
-        var value = parseInt(args[2]);
-        self.sequencers.muteSequencer.setStep(stepIndex, value);
+        self.sequencers.muteSequencer.setStep(parseInt(args[1]), parseInt(args[2]));
+        self.sendSequencerState('mute');
         self.broadcastState('mute_step');
     });
 
     this.commandRegistry.register('seq_mute_length', function(args) {
-        // args: [deviceId, length]
         if (args.length < 2 || !isForThisDevice(args[0])) return;
-        var length = parseInt(args[1]);
-        self.sequencers.muteSequencer.setLength(length);
+        self.sequencers.muteSequencer.setLength(parseInt(args[1]));
+        self.sendSequencerState('mute');
         self.broadcastState('mute_length');
     });
 
     this.commandRegistry.register('seq_mute_rate', function(args) {
-        // args: [deviceId, bars, beats, ticks]
         if (args.length < 4 || !isForThisDevice(args[0])) return;
-        var bars = parseInt(args[1]);
-        var beats = parseInt(args[2]);
-        var ticks = parseInt(args[3]);
-        self.sequencers.muteSequencer.setDivision([bars, beats, ticks], self.timeSignatureNumerator);
+        self.sequencers.muteSequencer.setDivision([parseInt(args[1]), parseInt(args[2]), parseInt(args[3])], self.timeSignatureNumerator);
+        self.sendSequencerState('mute');
         self.broadcastState('mute_rate');
     });
 
     // Pitch sequencer commands
     this.commandRegistry.register('seq_pitch_step', function(args) {
-        // args: [deviceId, stepIndex, value]
         if (args.length < 3 || !isForThisDevice(args[0])) return;
-        var stepIndex = parseInt(args[1]);
-        var value = parseInt(args[2]);
-        self.sequencers.pitchSequencer.setStep(stepIndex, value);
+        self.sequencers.pitchSequencer.setStep(parseInt(args[1]), parseInt(args[2]));
+        self.sendSequencerState('pitch');
         self.broadcastState('pitch_step');
     });
 
     this.commandRegistry.register('seq_pitch_length', function(args) {
-        // args: [deviceId, length]
         if (args.length < 2 || !isForThisDevice(args[0])) return;
-        var length = parseInt(args[1]);
-        self.sequencers.pitchSequencer.setLength(length);
+        self.sequencers.pitchSequencer.setLength(parseInt(args[1]));
+        self.sendSequencerState('pitch');
         self.broadcastState('pitch_length');
     });
 
     this.commandRegistry.register('seq_pitch_rate', function(args) {
-        // args: [deviceId, bars, beats, ticks]
         if (args.length < 4 || !isForThisDevice(args[0])) return;
-        var bars = parseInt(args[1]);
-        var beats = parseInt(args[2]);
-        var ticks = parseInt(args[3]);
-        self.sequencers.pitchSequencer.setDivision([bars, beats, ticks], self.timeSignatureNumerator);
+        self.sequencers.pitchSequencer.setDivision([parseInt(args[1]), parseInt(args[2]), parseInt(args[3])], self.timeSignatureNumerator);
+        self.sendSequencerState('pitch');
         self.broadcastState('pitch_rate');
     });
 
@@ -317,23 +305,8 @@ SequencerDevice.prototype.init = function() {
                 instrumentType: this.instrumentType
             });
 
-            // Send initial state to UI (defaults, before request_ui_values overrides)
-            for (var seqName in this.sequencers) {
-                if (this.sequencers.hasOwnProperty(seqName)) {
-                    var cleanName = seqName.replace('Sequencer', '');
-                    this.sendSequencerState(cleanName);
-                }
-            }
-            this.sendTemperatureState();
-
-            // Activate observers if patterns are already non-default
-            this.checkAndActivateObservers();
-
-            // Send initial state broadcast with 'init' origin
-            this.broadcastState('init');
-
             // Request UI elements to re-emit their persisted values
-            // Max patch handles this by triggering all UI elements to output to inlet 2
+            // UI elements are the source of truth — their values become the initial state
             outlet(0, "request_ui_values", 1);
         } else {
             handleError("init", "Could not find track reference", true);

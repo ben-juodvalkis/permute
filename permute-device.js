@@ -1482,11 +1482,6 @@ function init() {
     sequencer.init();
 }
 
-// Support bang message for initialization
-function bang() {
-    sequencer.init();
-}
-
 function clip_changed() {
     sequencer.onClipChanged();
 }
@@ -1539,11 +1534,6 @@ function anything() {
             debug("anything", "Unknown inlet: " + inletNum);
     }
 }
-
-// Handle loadbang
-function loadbang() {
-}
-
 
 // Handle notifydeleted
 function notifydeleted() {

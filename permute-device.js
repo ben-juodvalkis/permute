@@ -1286,6 +1286,8 @@ SequencerDevice.prototype.handleOSCCommand = function(address, args) {
  * @param {Array} args - Message arguments
  */
 SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
+    debug("handleMaxUICommand", messageName + " " + args.join(" "));
+
     // Mute/pitch step grids — full 8-value row from live.grid
     if (messageName === 'mute_ui_steps' || messageName === 'pitch_ui_steps') {
         var seqName = (messageName === 'mute_ui_steps') ? 'mute' : 'pitch';

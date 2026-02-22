@@ -1,10 +1,7 @@
 /**
  * permute-observer-registry.js - Centralized observer management
  *
- * Extracted from permute-device.js during Phase 3 modularization.
  * No dependencies.
- *
- * @version 3.1
  */
 
 /**

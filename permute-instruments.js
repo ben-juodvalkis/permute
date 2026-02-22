@@ -1,10 +1,7 @@
 /**
- * permute-instruments.js - Instrument detection and strategy pattern
+ * permute-instruments.js - Instrument detection and transpose strategies
  *
- * Extracted from permute-device.js during Phase 3 modularization.
  * Depends on: permute-constants, permute-utils
- *
- * @version 3.1
  */
 
 var constants = require('permute-constants');
@@ -20,14 +17,12 @@ var handleError = utils.handleError;
 // ===== INSTRUMENT DETECTOR HELPER =====
 
 /**
- * InstrumentDetector - Shared helper for finding instrument devices.
- * V4.0: Simplified to just find the device, not classify it.
+ * InstrumentDetector - Finds instrument devices on a track.
  */
 function InstrumentDetector() {}
 
 /**
  * Find the first instrument device on a track.
- * V4.0: No longer classifies device type - just finds it.
  *
  * @param {LiveAPI} track - Track to analyze
  * @returns {Object|null} - { device, deviceId } or null
@@ -81,8 +76,7 @@ InstrumentStrategy.prototype.revertTranspose = function() {
 };
 
 /**
- * TransposeStrategy - Unified parameter-based pitch transposition.
- * V4.0: Single strategy for all devices with named transpose parameters.
+ * TransposeStrategy - Parameter-based pitch transposition.
  * Works for drum racks, instrument racks, and any device with a transpose macro.
  *
  * @param {LiveAPI} device - Device containing the transpose parameter
@@ -145,12 +139,9 @@ TransposeStrategy.prototype.revertTranspose = function() {
     debug("transpose", "revertTranspose called, originalTranspose=" + this.originalTranspose);
     this.applyTranspose(false);
     debug("transpose", "revertTranspose complete");
-    // Do not reset originalTranspose here - it persists across transport
-    // cycles so that applyTranspose() uses the known-good baseline rather
-    // than re-reading the param (which may still hold a shifted value if
-    // the revert hasn't propagated yet). V5.0: Strategy instances now
-    // persist across transport cycles (detectInstrumentType is no longer
-    // called on transport start), so this preservation is essential.
+    // originalTranspose persists across transport cycles so applyTranspose()
+    // uses the known-good baseline rather than re-reading the param (which
+    // may still hold a shifted value if the revert hasn't propagated yet).
 };
 
 /**
@@ -172,7 +163,6 @@ DefaultInstrumentStrategy.prototype.revertTranspose = function() {
 
 module.exports = {
     InstrumentDetector: InstrumentDetector,
-    InstrumentStrategy: InstrumentStrategy,
     TransposeStrategy: TransposeStrategy,
     DefaultInstrumentStrategy: DefaultInstrumentStrategy
 };

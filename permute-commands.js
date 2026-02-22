@@ -1,10 +1,7 @@
 /**
  * permute-commands.js - Command registry for message dispatch
  *
- * Extracted from permute-device.js during Phase 3 modularization.
  * No dependencies.
- *
- * @version 3.1
  */
 
 /**

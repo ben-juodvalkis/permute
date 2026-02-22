@@ -1,11 +1,8 @@
 /**
  * permute-shuffle.js - Pure shuffle/swap functions for temperature transformation
  *
- * Extracted from permute-device.js during Phase 3 modularization.
- * These are pure functions with no device coupling, making them independently testable.
+ * Pure functions with no device coupling.
  * Depends on: permute-utils (debug only)
- *
- * @version 3.1
  */
 
 var utils = require('permute-utils');
@@ -68,7 +65,7 @@ function generateSwapPattern(notes, temperature) {
         used.push(false);
     }
 
-    // V3.1: Track if we've created at least one group
+    // Guarantee at least one swap when temp > 0
     var hasCreatedGroup = false;
 
     for (var i = 0; i < sortedIndices.length; i++) {
@@ -77,7 +74,6 @@ function generateSwapPattern(notes, temperature) {
         // Should we form a group starting here?
         var roll = Math.random();
 
-        // V3.1: Guarantee at least one swap when temp > 0
         // On last available pair, force creation if no groups yet
         var isLastChance = !hasCreatedGroup && (i >= sortedIndices.length - 2);
         var shouldFormGroup = (roll < temperature) || isLastChance;
@@ -124,7 +120,7 @@ function generateSwapPattern(notes, temperature) {
                 indices: group,
                 shuffled: shuffledIndices
             });
-            hasCreatedGroup = true;  // V3.1: Mark that we've created a group
+            hasCreatedGroup = true;
         }
     }
 

@@ -34,12 +34,21 @@ Remove the pattr persistence layer and rely on Max UI elements with `parameter_e
 
 ---
 
-## Remaining (Max patch — user does in Max editor)
+## Remaining: Max Patch Wiring
 
-- [ ] Remove pattr routing objects (`[route pattr_state]`, `[prepend restoreState]`, `[pattr]` objects)
-- [ ] Remove patchcords from old outlet 2
-- [ ] Add `[route request_ui_values]` on outlet 0 to trigger all UI elements to re-emit their values to inlet 2
-- [ ] Verify temperature live.dial has `parameter_enable` and wiring through `[prepend temperature_ui]`
+The Max patch needs to be rewired to match the JS's 3-inlet / 2-outlet architecture. See the complete wiring reference with diagrams and message formats:
+
+**Wiring reference:** `.claude/plans/dazzling-leaping-neumann.md`
+
+Key tasks:
+- [ ] Wire transport chain (metro → transport → prepend song_time) to **inlet 0**
+- [ ] Wire OSC bridge to **inlet 1**
+- [ ] Rename prepends to `mute_ui_steps`, `mute_ui_length`, `mute_ui_division` and wire to **inlet 2**
+- [ ] Add `[i]` objects between `live.text` buttons and `join` (for re-emission)
+- [ ] Add `[route request_ui_values]` → `[defer]` → `[t b b b]` on **outlet 0** to bang UI elements on load
+- [ ] Wire `[route state_broadcast]` on **outlet 1** to OSC bridge
+- [ ] Add pitch UI elements (same pattern as mute with `pitch_ui_*` prefixes)
+- [ ] Verify temperature dial has `parameter_enable: 1` and wires through `[prepend temperature_ui]` to inlet 2
 
 ---
 

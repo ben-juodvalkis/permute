@@ -49,7 +49,7 @@ This eliminated ~30% of code compared to the previous pristine-state approach.
 
 ### Initialization Lifecycle
 
-Max startup order: `restoreState()` fires BEFORE `init()`. The `initialized` flag gates `pattr_state` output to prevent `init()` from overwriting saved state. Observer creation is deferred until `init()` establishes the track reference.
+`init()` establishes the track reference, detects instrument type, sets up observers, then sends `request_ui_values` via outlet 0. The Max patch responds by triggering all UI elements to re-emit their persisted values to inlet 2, which `handleMaxUICommand()` processes normally. State persistence is handled entirely by UI elements with `parameter_enable: 1`. See `docs/adr/006-remove-pattr-ui-source-of-truth.md`.
 
 ### Modular Architecture
 
@@ -105,9 +105,8 @@ var DEBUG_MODE = true;
 3. Update `docs/api.md` with new command
 
 ### Modify State Broadcast
-1. Update `broadcastState()` method
-2. Update `restoreState()` for pattr compatibility
-3. Update `docs/api.md` format table
+1. Update `broadcastState()` / `broadcastToOSC()` methods
+2. Update `docs/api.md` format table
 
 ## Documentation Maintenance
 

@@ -11,7 +11,7 @@
 
 autowatch = 1;
 inlets = 3;  // 0: Transport (song_time), 1: OSC commands, 2: Max UI commands
-outlets = 3; // 0: UI feedback, 1: OSC broadcasts, 2: pattr state
+outlets = 2; // 0: UI feedback, 1: OSC broadcasts
 
 // ===== MODULE IMPORTS =====
 var constants = require('permute-constants');
@@ -93,8 +93,7 @@ function SequencerDevice() {
     // V3.0: Batching queue
     this.pendingApplies = {}; // clipId -> { mute, pitch, scheduled, task }
 
-    // Initialization lifecycle flag - prevents pattr_state output during init/restore window
-    this.initialized = false;
+
 
     // State management objects
     this.trackState = new TrackState();
@@ -321,14 +320,15 @@ SequencerDevice.prototype.init = function() {
                 }
             }
 
-            // If restoreState() ran before init(), patterns may already be active
-            // but observers weren't created (Live API wasn't ready). Check now.
+            // Activate observers if patterns are already non-default
             this.checkAndActivateObservers();
 
             // Send initial state broadcast with 'init' origin
             this.broadcastState('init');
 
-            this.initialized = true;
+            // Request UI elements to re-emit their persisted values
+            // Max patch handles this by triggering all UI elements to output to inlet 2
+            outlet(0, "request_ui_values", 1);
         } else {
             handleError("init", "Could not find track reference", true);
         }
@@ -447,8 +447,8 @@ SequencerDevice.prototype.checkAndActivateObservers = function() {
     if (this.playbackObserversActive) return;
 
     // Don't create observers before init() has established the track reference.
-    // restoreState() fires before init() and calls setPattern() which triggers this,
-    // but Live API isn't ready yet. init() calls this again after setup.
+    // UI elements may send restored values before init(), but Live API isn't ready yet.
+    // init() calls this again after setup.
     if (!this.trackState.ref) return;
 
     // Check if either sequencer is now active
@@ -1105,7 +1105,7 @@ SequencerDevice.prototype.sendSequencerFeedback = function(seqName) {
 };
 
 /**
- * Build state data array shared by OSC and pattr broadcasts.
+ * Build state data array for OSC broadcasts.
  * Returns the raw data (without message selector or origin).
  *
  * Format (27 values):
@@ -1200,7 +1200,6 @@ SequencerDevice.prototype.buildStateData = function() {
  *   'pitch_rate'    - Pitch rate changed via OSC
  *   'temperature'   - Temperature changed via OSC
  *   'position'      - Playhead moved (during playback)
- *   'pattr_restore' - Restored from Live Set / pattr
  *
  * @param {string} origin - Why this broadcast is happening
  * @param {Array} [stateData] - Pre-built state data (optional, builds if not provided)
@@ -1214,58 +1213,17 @@ SequencerDevice.prototype.broadcastToOSC = function(origin, stateData) {
     outlet.apply(null, [1].concat(args));
 };
 
-/**
- * Broadcast state to pattr storage (outlet 2).
- * Sends pattr_state WITHOUT origin (not needed for persistence).
- *
- * Format (28 args):
- *   pattr_state, trackIndex, mutePattern[8], muteLength, muteBars, muteBeats,
- *   muteTicks, mutePosition, pitchPattern[8], pitchLength, pitchBars, pitchBeats,
- *   pitchTicks, pitchPosition, temperature
- *
- * Guards:
- *   - Skips until initialized (prevents defaults overwriting saved state during startup)
- *   - Caller is responsible for not calling during pattr_restore (prevents feedback loop)
- *   - Caller is responsible for not calling for position-only updates (too frequent)
- *
- * @param {Array} [stateData] - Pre-built state data (optional, builds if not provided)
- */
-SequencerDevice.prototype.broadcastToPattr = function(stateData) {
-    if (!this.initialized) return;
-
-    var data = stateData || this.buildStateData();
-    if (!data) return;
-
-    var args = ["pattr_state"].concat(data);
-    outlet.apply(null, [2].concat(args));
-};
 
 /**
  * Broadcast combined sequencer state for multi-track display.
- * Routes to appropriate outlets based on origin.
- *
- * Routing rules:
- *   - Outlet 1 (OSC): Always sent
- *   - Outlet 2 (pattr): Skipped for position, pattr_restore, and init origins
  *
  * @param {string} origin - Why this broadcast is happening (default: 'unknown')
  */
 SequencerDevice.prototype.broadcastState = function(origin) {
     origin = origin || 'unknown';
-
     var data = this.buildStateData();
     if (!data) return;
-
-    // Broadcast to OSC (outlet 1)
     this.broadcastToOSC(origin, data);
-
-    // Broadcast to pattr (outlet 2) only for state changes
-    // Skip for position updates (too frequent, not needed for persistence)
-    // Skip for pattr_restore (just loaded from pattr, prevents feedback loop)
-    // Skip for init (prevents defaults overwriting saved pattr data)
-    if (origin !== 'position' && origin !== 'pattr_restore' && origin !== 'init') {
-        this.broadcastToPattr(data);
-    }
 };
 
 // ===== INLET-AWARE MESSAGE HANDLERS (Phase 3) =====
@@ -1286,7 +1244,7 @@ SequencerDevice.prototype.handleTransport = function(messageName, args) {
 /**
  * Handle OSC commands from inlet 1.
  * Parses /looping/sequencer/ addresses and routes to command handlers.
- * OSC commands update state, broadcast to UI + OSC + pattr.
+ * OSC commands update state and broadcast to OSC.
  *
  * @param {string} address - OSC address (e.g., '/looping/sequencer/mute/step')
  * @param {Array} args - Message arguments
@@ -1322,7 +1280,7 @@ SequencerDevice.prototype.handleOSCCommand = function(address, args) {
 /**
  * Handle Max UI commands from inlet 2.
  * Processes prefixed messages from Max patch UI objects.
- * UI commands update state, broadcast to OSC + pattr (skip UI — it already reflects the change).
+ * UI commands update state and broadcast to OSC (skip UI — it already reflects the change).
  *
  * @param {string} messageName - Message name (e.g., 'mute_ui_steps')
  * @param {Array} args - Message arguments
@@ -1347,7 +1305,6 @@ SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
         if (unchanged) return;
         seq.setPattern(pattern);
         this.broadcastToOSC(seqName + '_pattern');
-        this.broadcastToPattr();
         return;
     }
 
@@ -1360,8 +1317,7 @@ SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
             if (newLength === seq.patternLength) return;  // Break feedback loop
             seq.setLength(newLength);
             this.broadcastToOSC(seqName + '_length');
-            this.broadcastToPattr();
-        }
+            }
         return;
     }
 
@@ -1372,8 +1328,7 @@ SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
         if (args.length >= 3) {
             seq.setDivision([parseInt(args[0]), parseInt(args[1]), parseInt(args[2])], this.timeSignatureNumerator);
             this.broadcastToOSC(seqName + '_rate');
-            this.broadcastToPattr();
-        }
+            }
         return;
     }
 
@@ -1382,8 +1337,7 @@ SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
         if (args.length >= 1) {
             this.setTemperatureValue(parseFloat(args[0]));
             this.broadcastToOSC('temperature');
-            this.broadcastToPattr();
-        }
+            }
         return;
     }
 
@@ -1398,7 +1352,6 @@ SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
         this.temperatureActive = false;
         this.clearTemperatureLoopJumpObserver();
         this.broadcastToOSC('temperature');
-        this.broadcastToPattr();
         return;
     }
 
@@ -1493,7 +1446,7 @@ SequencerDevice.prototype.setState = function(state) {
                 // Note: 'enabled' no longer restored - derived from pattern content
                 if (savedSeq.division) seq.setDivision(savedSeq.division, this.timeSignatureNumerator);
 
-                // UI feedback only — caller (restoreState/setvalueof) handles broadcast
+                // UI feedback only — caller handles broadcast
                 this.sendSequencerFeedbackLocal(name);
             }
         }
@@ -1530,8 +1483,8 @@ var sequencer = new SequencerDevice();
 // Named global functions exposed to Max for message handling.
 // With Phase 3 inlet separation, most messages route through anything() which
 // delegates to handleTransport(), handleOSCCommand(), or handleMaxUICommand()
-// based on the inlet global. Only init/restoreState/pattr functions remain as
-// named globals (they are called directly by Max/pattr, not via inlet routing).
+// based on the inlet global. init/bang/clip_changed/notifydeleted remain as
+// named globals called directly by Max, not via inlet routing.
 
 function init() {
     sequencer.init();
@@ -1559,60 +1512,6 @@ function setState(stateJson) {
     }
 }
 
-/**
- * Restore state from pattr (28-arg list format matching ADR-166).
- * Called on Live Set load via: [route pattr_state] -> [prepend restoreState] -> v8
- *
- * Args (28 total):
- *   trackIndex (0),
- *   mutePattern[8] (1-8), muteLength (9), muteBars (10), muteBeats (11), muteTicks (12),
- *   mutePosition (13),
- *   pitchPattern[8] (14-21), pitchLength (22), pitchBars (23), pitchBeats (24), pitchTicks (25),
- *   pitchPosition (26),
- *   temperature (27)
- *
- * Note: muteEnabled/pitchEnabled removed in ADR-166 - now derived from pattern content.
- */
-function restoreState() {
-    var args = arrayfromargs(arguments);
-    debug("restoreState", "Called with " + args.length + " args");
-
-    if (args.length < 28) {
-        debug("restoreState", "Not enough args (expected 28, got " + args.length + "), skipping");
-        return;
-    }
-
-    // Parse flat 28-arg format into state object, then delegate to setState()
-    // This ensures all setter side effects fire (observer activation, timing calculation, etc.)
-    var idx = 1;  // Skip trackIndex (arg 0)
-
-    var mutePattern = [];
-    for (var i = 0; i < 8; i++) mutePattern.push(parseInt(args[idx++]));
-    var muteLength = parseInt(args[idx++]);
-    var muteDivision = [parseInt(args[idx++]), parseInt(args[idx++]), parseInt(args[idx++])];
-    idx++;  // Skip mute position (runtime state)
-
-    var pitchPattern = [];
-    for (var i = 0; i < 8; i++) pitchPattern.push(parseInt(args[idx++]));
-    var pitchLength = parseInt(args[idx++]);
-    var pitchDivision = [parseInt(args[idx++]), parseInt(args[idx++]), parseInt(args[idx++])];
-    idx++;  // Skip pitch position (runtime state)
-
-    var temp = parseFloat(args[idx++]);
-
-    sequencer.setState({
-        version: '3.1',
-        sequencers: {
-            mute: { pattern: mutePattern, patternLength: muteLength, division: muteDivision },
-            pitch: { pattern: pitchPattern, patternLength: pitchLength, division: pitchDivision }
-        },
-        temperature: temp
-    });
-
-    sequencer.initialized = true;
-    debug("restoreState", "State restored via setState(), broadcasting");
-    sequencer.broadcastState('pattr_restore');
-}
 
 // Main message handler
 function msg_int() {
@@ -1653,37 +1552,6 @@ function anything() {
 function loadbang() {
 }
 
-// ===== STATE PERSISTENCE (pattrstorage) =====
-// These functions are called by pattrstorage to save/restore state with Live Set
-
-/**
- * Called by pattrstorage when Live saves the set.
- * Returns sequencer state as JSON string.
- */
-function getvalueof() {
-    var state = sequencer.getState();
-    var json = JSON.stringify(state);
-    debug("getvalueof", "Saving state", { version: state.version, temperature: state.temperature });
-    return json;
-}
-
-/**
- * Called by pattrstorage when Live loads a set.
- * Restores sequencer state from JSON string.
- */
-function setvalueof(v) {
-    if (v && typeof v === 'string') {
-        try {
-            var state = JSON.parse(v);
-            debug("setvalueof", "Restoring state", { version: state.version });
-            sequencer.setState(state);
-            sequencer.initialized = true;
-            sequencer.broadcastState('pattr_restore');
-        } catch (e) {
-            handleError("setvalueof", e, true);
-        }
-    }
-}
 
 // Handle notifydeleted
 function notifydeleted() {

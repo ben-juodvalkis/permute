@@ -136,7 +136,6 @@ The `origin` field indicates why the broadcast occurred:
 | Origin | Description | Typical Frontend Action |
 |--------|-------------|------------------------|
 | `init` | Device just initialized | Apply full state |
-| `pattr_restore` | Restored from Live Set | Apply full state |
 | `set_state_ack` | Echo of set/state command | Skip (it's an echo) |
 | `mute_step` | Mute step changed | Skip (echo) |
 | `pitch_step` | Pitch step changed | Skip (echo) |
@@ -188,13 +187,9 @@ temperature_reset
 temperature_shuffle
 ```
 
-### State Persistence (pattr)
+### State Persistence
 
-Permute integrates with Max's `pattr` system for Live Set persistence:
-
-- `getvalueof()` - Returns JSON state when Live saves
-- `setvalueof(json)` - Restores state when Live loads
-- `restoreState(args...)` - Alternative restore via pattr routing
+State is persisted via Max UI elements with `parameter_enable: 1`. On device load, `init()` sends `request_ui_values` to trigger UI elements to re-emit their values to the JS.
 
 ---
 

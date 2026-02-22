@@ -204,8 +204,8 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
         // args: [deviceId, value]
         if (args.length < 2 || !isForThisDevice(args[0])) return;
         var value = parseFloat(args[1]);
-        // Reuse existing temperature logic
         self.setTemperatureValue(value);
+        self.sendTemperatureState();
         self.broadcastState('temperature');
     });
 
@@ -259,6 +259,11 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
         // Temperature
         var temp = parseFloat(args[idx++]);
         self.setTemperatureValue(temp);
+        self.sendTemperatureState();
+
+        // Send sequencer state to UI
+        self.sendSequencerState('mute');
+        self.sendSequencerState('pitch');
 
         self.broadcastState('set_state_ack');
     });
@@ -312,13 +317,14 @@ SequencerDevice.prototype.init = function() {
                 instrumentType: this.instrumentType
             });
 
-            // Send initial feedback for all sequencers (UI feedback only, no broadcast)
+            // Send initial state to UI (defaults, before request_ui_values overrides)
             for (var seqName in this.sequencers) {
                 if (this.sequencers.hasOwnProperty(seqName)) {
                     var cleanName = seqName.replace('Sequencer', '');
-                    this.sendSequencerFeedbackLocal(cleanName);
+                    this.sendSequencerState(cleanName);
                 }
             }
+            this.sendTemperatureState();
 
             // Activate observers if patterns are already non-default
             this.checkAndActivateObservers();
@@ -540,7 +546,7 @@ SequencerDevice.prototype.onTransportStop = function() {
                 seq.currentStep = -1;
                 seq.lastParameterValue = undefined;
                 var cleanName = name.replace('Sequencer', '');
-                this.sendSequencerFeedback(cleanName);
+                this.sendSequencerPosition(cleanName);
             }
         }
         return;
@@ -631,9 +637,8 @@ SequencerDevice.prototype.onTransportStop = function() {
             seq.currentStep = -1;
             seq.lastParameterValue = undefined;  // V4.1: Reset for next transport start
 
-            // Send updated feedback
             var cleanName = name.replace('Sequencer', '');
-            this.sendSequencerFeedback(cleanName);
+            this.sendSequencerPosition(cleanName);
         }
     }
 
@@ -1049,7 +1054,7 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, ticks) {
                 this.instrumentStrategy.applyTranspose(shouldShiftUp);
                 seq.lastParameterValue = value;
             }
-            this.sendSequencerFeedback(seqName);
+            this.sendSequencerPosition(seqName);
             return;
         }
 
@@ -1059,19 +1064,19 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, ticks) {
             this.scheduleBatchApply(clip.id, seqName, value);
         }
 
-        this.sendSequencerFeedback(seqName);
+        this.sendSequencerPosition(seqName);
     } catch (error) {
         handleError("processSequencerTick:" + seqName, error, false);
     }
 };
 
 /**
- * Send feedback to Max UI only (no OSC broadcast).
- * Used during init to avoid triggering 'position' origin broadcasts.
+ * Send full sequencer state to Max UI (outlet 0).
+ * Called only when state actually changes (init, setState, UI command).
  *
  * @param {string} seqName - Sequencer name ('mute', 'pitch', etc.)
  */
-SequencerDevice.prototype.sendSequencerFeedbackLocal = function(seqName) {
+SequencerDevice.prototype.sendSequencerState = function(seqName) {
     var seq = this.sequencers[seqName + 'Sequencer'];
     if (!seq) return;
 
@@ -1087,27 +1092,31 @@ SequencerDevice.prototype.sendSequencerFeedbackLocal = function(seqName) {
     // Division (bars, beats, ticks)
     outlet(0, seqName + "_division", seq.division[0], seq.division[1], seq.division[2]);
 
-    // Current step indicator
+    // Current step and active state
     outlet(0, seqName + "_current", seq.currentStep);
-
-    // Active state (derived from pattern content)
     outlet(0, seqName + "_active", seq.isActive() ? 1 : 0);
 };
 
 /**
- * Generic feedback sender for any sequencer.
- * Sends pattern, current step, and active state to Max UI.
- * Also broadcasts state for multi-track display (used during playback).
+ * Send only the current step position to Max UI (outlet 0) and OSC.
+ * Called on every sequencer tick during playback — kept minimal for efficiency.
  *
  * @param {string} seqName - Sequencer name ('mute', 'pitch', etc.)
  */
-SequencerDevice.prototype.sendSequencerFeedback = function(seqName) {
-    // Send local feedback to Max UI
-    this.sendSequencerFeedbackLocal(seqName);
+SequencerDevice.prototype.sendSequencerPosition = function(seqName) {
+    var seq = this.sequencers[seqName + 'Sequencer'];
+    if (!seq) return;
 
-    // Broadcast state for multi-track sequencer display
-    // During playback, this is a position update
+    outlet(0, seqName + "_current", seq.currentStep);
     this.broadcastState('position');
+};
+
+/**
+ * Send temperature value to Max UI (outlet 0).
+ * Called when temperature changes from OSC or on init/setState.
+ */
+SequencerDevice.prototype.sendTemperatureState = function() {
+    outlet(0, "temperature", this.temperatureValue || 0.0);
 };
 
 /**
@@ -1456,13 +1465,14 @@ SequencerDevice.prototype.setState = function(state) {
                 if (savedSeq.division) seq.setDivision(savedSeq.division, this.timeSignatureNumerator);
 
                 // UI feedback only — caller handles broadcast
-                this.sendSequencerFeedbackLocal(name);
+                this.sendSequencerState(name);
             }
         }
 
         // v3.1: Restore temperature
         if (state.temperature !== undefined) {
             this.setTemperatureValue(state.temperature);
+            this.sendTemperatureState();
         }
     }
     // Handle legacy v1.x format (backward compatibility)
@@ -1472,7 +1482,7 @@ SequencerDevice.prototype.setState = function(state) {
             if (state.mute.pattern) muteSeq.setPattern(state.mute.pattern);
             if (state.mute.patternLength) muteSeq.setLength(state.mute.patternLength);
             if (state.mute.division) muteSeq.setDivision(state.mute.division, this.timeSignatureNumerator);
-            this.sendSequencerFeedbackLocal('mute');
+            this.sendSequencerState('mute');
         }
 
         if (state.pitch && this.sequencers.pitchSequencer) {
@@ -1480,7 +1490,7 @@ SequencerDevice.prototype.setState = function(state) {
             if (state.pitch.pattern) pitchSeq.setPattern(state.pitch.pattern);
             if (state.pitch.patternLength) pitchSeq.setLength(state.pitch.patternLength);
             if (state.pitch.division) pitchSeq.setDivision(state.pitch.division, this.timeSignatureNumerator);
-            this.sendSequencerFeedbackLocal('pitch');
+            this.sendSequencerState('pitch');
         }
     }
 };

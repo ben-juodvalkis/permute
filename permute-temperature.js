@@ -1,11 +1,8 @@
 /**
  * permute-temperature.js - Temperature transformation mixin for SequencerDevice
  *
- * Extracted from permute-device.js during Phase 3 modularization.
  * Applied as a mixin to SequencerDevice.prototype.
  * Depends on: permute-constants, permute-utils, permute-shuffle
- *
- * @version 3.1
  */
 
 var constants = require('permute-constants');
@@ -80,7 +77,7 @@ function applyTemperatureMethods(proto) {
 
     /**
      * Set temperature value with state transitions.
-     * V4.2: Extracted from temperature() function for use by OSC command handlers.
+     * Handles 0->active and active->0 transitions (capture/restore).
      *
      * @param {number} value - Temperature value (0.0-1.0)
      */
@@ -127,11 +124,7 @@ function applyTemperatureMethods(proto) {
     /**
      * Capture original pitches by note ID for temperature transformation.
      * Called when temperature transitions from 0 to >0.
-     *
-     * V3.1: Uses Live API note_id for robust tracking that handles:
-     * - Overdubbing (new notes simply won't exist in map)
-     * - Note deletion (missing IDs gracefully skipped)
-     * - Pitch sequencer interaction (accounts for current pitch state)
+     * Handles overdubbing (new notes not in map) and note deletion (IDs skipped).
      *
      * @param {string} clipId - Clip ID to capture state for
      */
@@ -183,10 +176,7 @@ function applyTemperatureMethods(proto) {
     /**
      * Restore original pitches from note ID map.
      * Called when temperature transitions from >0 to 0.
-     *
-     * V3.1: Restores each note to its original pitch by note ID.
-     * - Notes that were overdubbed (not in map) keep their current pitch
-     * - Accounts for current pitch sequencer state when restoring
+     * Overdubbed notes (not in map) keep their current pitch.
      *
      * @param {string} clipId - Clip ID to restore state for
      */
@@ -253,14 +243,8 @@ function applyTemperatureMethods(proto) {
 
     /**
      * Handle temperature loop jump.
-     * V3.1: Restores to original pitches first, then applies fresh random shuffle.
-     *
-     * This ensures temperature value directly controls "distance from original":
-     * - temp = 0.1 -> few swaps from original each loop
-     * - temp = 0.9 -> many swaps from original each loop
-     *
-     * Each loop is random but always based on the original pitches,
-     * not cumulative scrambling on top of previous scrambles.
+     * Restores to original pitches first, then applies fresh random shuffle.
+     * Each loop shuffles from the original—no cumulative scrambling.
      */
     proto.onTemperatureLoopJump = function() {
         if (!this.temperatureActive || this.temperatureValue <= 0) return;

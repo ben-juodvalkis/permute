@@ -1,10 +1,7 @@
 /**
  * permute-utils.js - Utility functions
  *
- * Extracted from permute-device.js during Phase 3 modularization.
  * Depends on: permute-constants
- *
- * @version 3.1
  */
 
 var constants = require('permute-constants');
@@ -48,10 +45,6 @@ function handleError(context, error, isCritical) {
     }
 }
 
-function post_error(msg) {
-    error("[Sequencer ERROR] " + msg + "\n");
-}
-
 /**
  * Parse notes response from Live API call.
  * Handles both string JSON format and array format.
@@ -81,20 +74,7 @@ function parseNotesResponse(notesJson) {
 }
 
 /**
- * Check if state change requires action.
- * Used by pitch sequencer to avoid unnecessary API calls.
- *
- * @param {boolean} shouldApply - Desired state
- * @param {boolean} currentState - Current state
- * @returns {boolean} - True if change is needed
- */
-function needsStateChange(shouldApply, currentState) {
-    return shouldApply !== currentState;
-}
-
-/**
- * Get cached parameter API reference for a device.
- * Creates a new LiveAPI object for the specified parameter.
+ * Get LiveAPI reference for a device parameter.
  *
  * @param {LiveAPI} device - Device LiveAPI object
  * @param {number} paramIndex - Parameter index
@@ -108,9 +88,7 @@ function getDeviceParameter(device, paramIndex) {
 /**
  * Find transpose parameter by scanning device parameters for known names.
  * Returns the first match based on priority order from config.
- * V4.0: Name-based parameter detection (case-insensitive, exact match).
- *
- * Performance: Scans up to 17 parameters (typical rack macro count).
+ * Case-insensitive exact match, scans up to 17 parameters (typical rack macro count).
  * Called once per device load, not per-step.
  *
  * @param {LiveAPI} device - Device to scan
@@ -237,26 +215,13 @@ function defer(callback) {
 }
 
 /**
- * Calculate ticks per step based on division and time signature.
- * @param {Array|string} division - Division format
+ * Calculate ticks per step from [bars, beats, ticks] division and time signature.
+ * @param {Array} division - Division as [bars, beats, ticks]
  * @param {number} timeSignature - Time signature numerator
  * @returns {number} - Ticks per step
  */
 function calculateTicksPerStep(division, timeSignature) {
-    if (typeof division === "string") {
-        // Legacy string format
-        switch(division) {
-            case "1/1":  return TICKS_PER_QUARTER_NOTE * 4;
-            case "1/2":  return TICKS_PER_QUARTER_NOTE * 2;
-            case "1/4":  return TICKS_PER_QUARTER_NOTE;
-            case "1/8":  return TICKS_PER_QUARTER_NOTE / 2;
-            case "1/16": return TICKS_PER_QUARTER_NOTE / 4;
-            case "1/32": return TICKS_PER_QUARTER_NOTE / 8;
-            case "1/64": return TICKS_PER_QUARTER_NOTE / 16;
-            default: return TICKS_PER_QUARTER_NOTE / 4;
-        }
-    } else if (Array.isArray(division) && division.length === 3) {
-        // Bar.beat.tick format
+    if (Array.isArray(division) && division.length === 3) {
         var bars = division[0];
         var beats = division[1];
         var ticks = division[2];
@@ -265,7 +230,6 @@ function calculateTicksPerStep(division, timeSignature) {
                (beats * TICKS_PER_QUARTER_NOTE) +
                ticks;
     }
-
     return TICKS_PER_QUARTER_NOTE / 4; // Default to 16th notes
 }
 
@@ -280,10 +244,7 @@ function setDebugMode(enabled) {
 module.exports = {
     debug: debug,
     handleError: handleError,
-    post_error: post_error,
     parseNotesResponse: parseNotesResponse,
-    needsStateChange: needsStateChange,
-    getDeviceParameter: getDeviceParameter,
     findTransposeParameterByName: findTransposeParameterByName,
     isParameterTransposeDevice: isParameterTransposeDevice,
     createObserver: createObserver,

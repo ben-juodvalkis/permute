@@ -2,10 +2,8 @@
  * permute-device.js - Dual mute/pitch sequencer for Max4Live
  *
  * Main device controller and Max message handlers.
- * Logic is modularized into CommonJS modules (Phase 3 refactor).
+ * Logic is modularized into CommonJS modules.
  *
- * @version 3.1
- * @author [Built interactively via Claude]
  * @requires Max4Live JavaScript API
  */
 
@@ -23,16 +21,11 @@ var instruments = require('permute-instruments');
 var CommandRegistry = require('permute-commands').CommandRegistry;
 var temperature = require('permute-temperature');
 
-// Unpack frequently used constants
-var TICKS_PER_QUARTER_NOTE = constants.TICKS_PER_QUARTER_NOTE;
 var OCTAVE_SEMITONES = constants.OCTAVE_SEMITONES;
-var MAX_PATTERN_LENGTH = constants.MAX_PATTERN_LENGTH;
-var MIN_PATTERN_LENGTH = constants.MIN_PATTERN_LENGTH;
 var DEFAULT_GAIN_VALUE = constants.DEFAULT_GAIN_VALUE;
 var MUTED_GAIN = constants.MUTED_GAIN;
 var INVALID_LIVE_API_ID = constants.INVALID_LIVE_API_ID;
 
-// Unpack frequently used utilities
 var debug = utils.debug;
 var handleError = utils.handleError;
 var parseNotesResponse = utils.parseNotesResponse;
@@ -40,13 +33,12 @@ var findTransposeParameterByName = utils.findTransposeParameterByName;
 var isParameterTransposeDevice = utils.isParameterTransposeDevice;
 var createObserver = utils.createObserver;
 var defer = utils.defer;
+var calculateTicksPerStep = utils.calculateTicksPerStep;
 
-// Unpack state classes
 var TrackState = stateClasses.TrackState;
 var ClipState = stateClasses.ClipState;
 var TransportState = stateClasses.TransportState;
 
-// Unpack instrument classes
 var InstrumentDetector = instruments.InstrumentDetector;
 var TransposeStrategy = instruments.TransposeStrategy;
 var DefaultInstrumentStrategy = instruments.DefaultInstrumentStrategy;
@@ -54,10 +46,9 @@ var DefaultInstrumentStrategy = instruments.DefaultInstrumentStrategy;
 // ===== MAIN SEQUENCER DEVICE =====
 
 function SequencerDevice() {
-    // V3.0: Sequencers without transformation wrappers
     this.sequencers = {
-        muteSequencer: new Sequencer('mute', null, 'binary', 8),
-        pitchSequencer: new Sequencer('pitch', null, 'binary', 8)
+        muteSequencer: new Sequencer('mute', 'binary', 8),
+        pitchSequencer: new Sequencer('pitch', 'binary', 8)
     };
 
     // Initialize mute pattern to all unmuted (1 = play, 0 = mute)
@@ -71,29 +62,27 @@ function SequencerDevice() {
         }
     }
 
-    // V3.0: Instrument detection for pitch transformation
+    // Instrument detection for pitch transformation
     this.instrumentType = 'unknown';
     this.instrumentDevice = null;
     this.instrumentDeviceId = null;
     this.instrumentStrategy = new DefaultInstrumentStrategy();
 
-    // V3.0: Temperature state (non-sequenced)
+    // Temperature state (non-sequenced)
     this.temperatureValue = 0.0;
     this.temperatureSwapPattern = [];
     this.temperatureActive = false;
     this.temperatureLoopJumpObserver = null;
 
-    // V3.1: Temperature note ID tracking for reversible transformations
+    // Temperature note ID tracking for reversible transformations
     // Maps clipId -> { originalPitches: { noteId: pitch }, capturedWithPitchOn: boolean }
     this.temperatureState = {};
 
-    // V3.0: Simple state tracking (no pristine needed)
-    this.lastValues = {}; // clipId -> { pitch: 0/1, mute: 0/1 }
+    // Delta-based state tracking: clipId -> { pitch: 0/1, mute: 0/1 }
+    this.lastValues = {};
 
-    // V3.0: Batching queue
-    this.pendingApplies = {}; // clipId -> { mute, pitch, scheduled, task }
-
-
+    // Batching queue: clipId -> { mute, pitch, scheduled, task }
+    this.pendingApplies = {};
 
     // State management objects
     this.trackState = new TrackState();
@@ -103,8 +92,7 @@ function SequencerDevice() {
     // Observer registry
     this.observerRegistry = new ObserverRegistry();
 
-    // V6.0: Lazy observer activation flag
-    // Transport and time signature observers only created when a sequencer becomes active
+    // Lazy observer activation: transport/time-sig observers created on first active sequencer
     this.playbackObserversActive = false;
 
     // Time signature tracking
@@ -291,14 +279,11 @@ SequencerDevice.prototype.init = function() {
             this.trackState.index = this.trackState.extractIndexFromPath(track.path);
             debug("init", "Track index: " + this.trackState.index);
 
-            // V3.0: Detect instrument type for pitch transformation
             this.detectInstrumentType();
 
-            // Setup device observer only (for instrument detection)
-            // Transport/time signature observers are lazy-created when sequencer becomes active
+            // Device observer for instrument re-detection
+            // Transport/time-sig observers are lazy-created when a sequencer becomes active
             this.setupDeviceObserver();
-            // Note: Transport and time signature observers NOT created here
-            // They are created lazily by ensurePlaybackObservers() when a sequencer is activated
 
             debug("init", "Initialization complete (dormant mode - no playback observers)", {
                 trackType: this.trackState.type,
@@ -331,12 +316,11 @@ SequencerDevice.prototype.setupDeviceObserver = function() {
         "devices",
         function(args) {
             defer(function() {
-                // V5.0: Revert current transpose before re-detecting, so we
+                // Revert current transpose before re-detecting, so we
                 // don't capture a shifted value as the new "original".
                 if (self.instrumentType === 'parameter_transpose') {
                     self.instrumentStrategy.revertTranspose();
                 }
-                // V3.0: Re-detect instrument type on device changes
                 self.detectInstrumentType();
             });
         }
@@ -389,7 +373,7 @@ SequencerDevice.prototype.setupTimeSignatureObserver = function() {
                 for (var name in self.sequencers) {
                     if (self.sequencers.hasOwnProperty(name)) {
                         var seq = self.sequencers[name];
-                        seq.ticksPerStep = self.getTicksPerStep(seq.division);
+                        seq.ticksPerStep = calculateTicksPerStep(seq.division, numerator);
                     }
                 }
 
@@ -402,9 +386,8 @@ SequencerDevice.prototype.setupTimeSignatureObserver = function() {
 };
 
 /**
- * V6.0: Ensure playback observers are active.
+ * Ensure playback observers are active.
  * Lazily creates transport and time signature observers when first needed.
- * Called when a sequencer becomes active (pattern has non-default values).
  */
 SequencerDevice.prototype.ensurePlaybackObservers = function() {
     if (this.playbackObserversActive) return;
@@ -419,7 +402,7 @@ SequencerDevice.prototype.ensurePlaybackObservers = function() {
 };
 
 /**
- * V6.0: Check if any sequencer is active and ensure observers if so.
+ * Check if any sequencer is active and ensure observers if so.
  * Called when pattern changes to potentially activate lazy observers.
  */
 SequencerDevice.prototype.checkAndActivateObservers = function() {
@@ -439,44 +422,17 @@ SequencerDevice.prototype.checkAndActivateObservers = function() {
     }
 };
 
-/**
- * Setup observers for clip changes.
- * V3.0: Minimal observation - temperature loop_jump only.
- * Note: External note edits during playback are ignored by design.
- *
- * @param {LiveAPI} clip - Live API clip object to observe
- */
-SequencerDevice.prototype.setupClipObservers = function(clip) {
-    // Clear existing observers
-    this.observerRegistry.unregister('notes');
-
-    // Clear temperature loop_jump observer when clip changes
-    this.clearTemperatureLoopJumpObserver();
-
-    // V3.0: No note observation needed - transformations track their own state
-};
-
 // ===== TRANSPORT HANDLING =====
 
 /**
  * Handle transport start.
- * V3.1: Detect instrument and capture temperature state if needed.
- *
- * Note: Temperature is reset to 0 on transport stop, so temperatureValue > 0
- * here means user set temperature before pressing play (preview workflow).
+ * Captures temperature state if temperature was set before playback.
  */
 SequencerDevice.prototype.onTransportStart = function() {
     debug("transport", "Transport started");
     this.transportState.setPlaying(true);
 
-    // V5.0: Do NOT call detectInstrumentType() here.
-    // It creates a new TransposeStrategy instance, discarding the preserved
-    // originalTranspose value and causing runaway octave shifting on quick
-    // stop/start cycles (the deferred revert may not have landed yet when
-    // the new strategy reads the param). Instrument detection is already
-    // handled by init() and the device observer (setupDeviceObserver).
-
-    // V3.1: If temperature was set before transport started, capture state now
+    // If temperature was set before transport started, capture state now
     if (this.temperatureValue > 0) {
         var clip = this.getCurrentClip();
         if (clip) {
@@ -492,19 +448,13 @@ SequencerDevice.prototype.onTransportStart = function() {
 
 /**
  * Handle transport stop.
- * V3.1: Undo transformations with temperature state priority.
- *
- * If temperature state exists (temp was > 0):
- *   - Restore TRUE base pitches from temperature state (no pitch sequencer adjustment)
- *   - Skip pitch sequencer delta undo (temperature already handles it)
- *
- * If no temperature state:
- *   - Use existing delta-based pitch undo
+ * Reverts all transformations. Temperature state takes priority over
+ * delta-based pitch undo when present.
  */
 SequencerDevice.prototype.onTransportStop = function() {
     debug("transport", "Transport stopped");
 
-    // V4.1: Always revert parameter_transpose on stop, even without a clip
+    // Always revert parameter_transpose on stop, even without a clip
     if (this.instrumentType === 'parameter_transpose') {
         this.instrumentStrategy.revertTranspose();
     }
@@ -528,7 +478,6 @@ SequencerDevice.prototype.onTransportStop = function() {
     var clipId = clip.id;
     var trackType = this.trackState.type;
 
-    // V3.1: Check if temperature state exists for this clip
     var hasTemperatureState = !!this.temperatureState[clipId];
 
     // Undo transformations based on last values
@@ -540,7 +489,6 @@ SequencerDevice.prototype.onTransportStop = function() {
                 if (notes && notes.notes) {
                     var changed = false;
 
-                    // V3.1: If temperature state exists, restore TRUE base pitches
                     if (hasTemperatureState) {
                         var tempState = this.temperatureState[clipId];
                         for (var i = 0; i < notes.notes.length; i++) {
@@ -557,11 +505,9 @@ SequencerDevice.prototype.onTransportStop = function() {
 
                         // Clear temperature state
                         delete this.temperatureState[clipId];
-                        // V4.1: parameter_transpose revert handled at top of function
                     } else {
                         // No temperature state - use delta-based pitch undo for note_transpose
                         if (this.lastValues[clipId] && this.lastValues[clipId].pitch === 1) {
-                            // V4.1: parameter_transpose revert handled at top of function
                             if (this.instrumentType !== 'parameter_transpose') {
                                 // Shift notes down
                                 for (var i = 0; i < notes.notes.length; i++) {
@@ -608,7 +554,7 @@ SequencerDevice.prototype.onTransportStop = function() {
         if (this.sequencers.hasOwnProperty(name)) {
             var seq = this.sequencers[name];
             seq.currentStep = -1;
-            seq.lastParameterValue = undefined;  // V4.1: Reset for next transport start
+            seq.lastParameterValue = undefined;
 
             var cleanName = name.replace('Sequencer', '');
             this.sendSequencerPosition(cleanName);
@@ -618,9 +564,7 @@ SequencerDevice.prototype.onTransportStop = function() {
     // Clear temperature observer (will be re-setup on next transport start if temp > 0)
     this.clearTemperatureLoopJumpObserver();
 
-    // V3.1: Clear temperatureActive flag but KEEP temperatureValue
-    // This allows the user to keep their temperature setting across transport cycles
-    // The state will be re-captured fresh on next transport start
+    // Clear active flag but keep temperatureValue across transport cycles
     this.temperatureActive = false;
 
     // Cancel any pending batch applies
@@ -637,7 +581,7 @@ SequencerDevice.prototype.onTransportStop = function() {
     this.transportState.setPlaying(false);
 };
 
-// ===== V3.0 BATCHING SYSTEM =====
+// ===== BATCHING SYSTEM =====
 
 /**
  * Schedule batch apply for a clip.
@@ -708,8 +652,7 @@ SequencerDevice.prototype.executeBatchApply = function(clipId) {
 };
 
 /**
- * Execute batch for MIDI clips.
- * V3.0: Apply deltas only on value change.
+ * Execute batch for MIDI clips. Applies deltas only on value change.
  *
  * @param {LiveAPI} clip - Clip object
  * @param {string} clipId - Clip ID
@@ -750,7 +693,6 @@ SequencerDevice.prototype.executeBatchMIDI = function(clip, clipId, pending) {
         if (pending.pitch !== lastPitch) {
             var shouldShiftUp = (pending.pitch === 1);
 
-            // V4.0: Check if using parameter-based transpose
             if (this.instrumentType === 'parameter_transpose') {
                 // Apply device parameter (absolute state)
                 this.instrumentStrategy.applyTranspose(shouldShiftUp);
@@ -788,8 +730,7 @@ SequencerDevice.prototype.executeBatchMIDI = function(clip, clipId, pending) {
 };
 
 /**
- * Execute batch for audio clips.
- * V3.0: Apply absolute state to gain/pitch_coarse parameters.
+ * Execute batch for audio clips. Sets gain/pitch_coarse as absolute state.
  *
  * @param {LiveAPI} clip - Clip object
  * @param {string} clipId - Clip ID
@@ -833,12 +774,11 @@ SequencerDevice.prototype.executeBatchAudio = function(clip, clipId, pending) {
 // Apply temperature methods to SequencerDevice.prototype from permute-temperature.js
 temperature.applyTemperatureMethods(SequencerDevice.prototype);
 
-// ===== V4.0 INSTRUMENT DETECTION =====
+// ===== INSTRUMENT DETECTION =====
 
 /**
  * Detect instrument and configure transpose strategy.
- * V4.0: Name-based parameter detection.
- * Called on transport start and device changes.
+ * Scans for named transpose parameters on the track's instrument device.
  */
 SequencerDevice.prototype.detectInstrumentType = function() {
     // Reset to defaults
@@ -893,7 +833,7 @@ SequencerDevice.prototype.detectInstrumentType = function() {
 
 /**
  * Get the currently playing clip on the track.
- * Automatically sets up clip observers when clip changes.
+ * Clears temperature observer when clip changes.
  * @returns {LiveAPI|null} - Live API clip object or null if no clip playing
  */
 SequencerDevice.prototype.getCurrentClip = function() {
@@ -915,9 +855,8 @@ SequencerDevice.prototype.getCurrentClip = function() {
         var clip = new LiveAPI(clipPath);
 
         if (clip && clip.id !== INVALID_LIVE_API_ID) {
-            // Setup observers if clip changed
             if (this.clipState.hasChanged(clip.id)) {
-                this.setupClipObservers(clip);
+                this.clearTemperatureLoopJumpObserver();
                 this.clipState.update(clip.id);
             }
             return clip;
@@ -932,55 +871,8 @@ SequencerDevice.prototype.getCurrentClip = function() {
 // ===== SHARED SEQUENCER FUNCTIONALITY =====
 
 /**
- * Convert bar.beat.tick format to absolute tick count.
- * Uses actual time signature from Live set for accurate conversion.
- * @param {number} bars - Number of bars
- * @param {number} beats - Number of beats
- * @param {number} ticks - Number of ticks
- * @returns {number} - Total ticks
- */
-SequencerDevice.prototype.barBeatTickToTicks = function(bars, beats, ticks) {
-    var ticksPerBeat = TICKS_PER_QUARTER_NOTE;
-    var beatsPerBar = this.timeSignatureNumerator;
-    var totalTicks = (bars * beatsPerBar * ticksPerBeat) + (beats * ticksPerBeat) + ticks;
-    return totalTicks;
-};
-
-/**
- * Calculate ticks per step based on division setting.
- * Supports both legacy string format ("1/16") and bar.beat.tick array format.
- * @param {string|Array} division - Division format
- * @returns {number} - Ticks per step
- */
-SequencerDevice.prototype.getTicksPerStep = function(division) {
-    if (typeof division === "string") {
-        // Legacy string format
-        switch(division) {
-            case "1/1":  return TICKS_PER_QUARTER_NOTE * 4;
-            case "1/2":  return TICKS_PER_QUARTER_NOTE * 2;
-            case "1/4":  return TICKS_PER_QUARTER_NOTE;
-            case "1/8":  return TICKS_PER_QUARTER_NOTE / 2;
-            case "1/16": return TICKS_PER_QUARTER_NOTE / 4;
-            case "1/32": return TICKS_PER_QUARTER_NOTE / 8;
-            case "1/64": return TICKS_PER_QUARTER_NOTE / 16;
-            default: return TICKS_PER_QUARTER_NOTE / 4;
-        }
-    } else if (Array.isArray(division) && division.length === 3) {
-        return this.barBeatTickToTicks(division[0], division[1], division[2]);
-    } else {
-        return 120; // Default to 16th notes
-    }
-};
-
-/**
  * Process both sequencers from a single song time message.
- * V4.2: Unified entry point - single song_time drives both mute and pitch.
- *
- * Called every 16th note (120 ticks) with absolute tick position from transport.
- * This replaces the old separate "mute ticks" / "pitch ticks" message paths.
- *
- * V4.3: Adds lookahead so transformations are applied before the audio actually
- * plays, compensating for processing latency.
+ * Applies lookahead so transformations land before the audio plays.
  *
  * @param {number} ticks - Absolute tick position from transport
  */
@@ -997,10 +889,10 @@ SequencerDevice.prototype.processWithSongTime = function(ticks) {
 
 /**
  * Generic tick processor for any sequencer.
- * V3.0: Calculates current step and schedules batch apply.
- * V4.1: Pitch sequencer with parameter_transpose works without a playing clip.
+ * Calculates current step and schedules batch apply.
+ * Pitch sequencer with parameter_transpose works without a playing clip.
  *
- * @param {string} seqName - Sequencer name ('mute', 'pitch', etc.)
+ * @param {string} seqName - Sequencer name ('mute', 'pitch')
  * @param {number} ticks - Absolute tick position
  */
 SequencerDevice.prototype.processSequencerTick = function(seqName, ticks) {
@@ -1018,8 +910,7 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, ticks) {
         var value = seq.getCurrentValue();
         var clip = this.getCurrentClip();
 
-        // V4.1: For pitch sequencer with parameter_transpose, we can apply directly
-        // without a clip since we're just adjusting a device parameter
+        // parameter_transpose applies directly without a clip (device parameter only)
         if (seqName === 'pitch' && this.instrumentType === 'parameter_transpose') {
             var shouldShiftUp = (value === 1);
             // Only apply if value changed from last applied
@@ -1033,7 +924,6 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, ticks) {
 
         // For other cases (mute, or pitch with note_transpose), we need a clip
         if (clip) {
-            // V3.0: Add to batch queue
             this.scheduleBatchApply(clip.id, seqName, value);
         }
 
@@ -1129,13 +1019,9 @@ SequencerDevice.prototype.buildStateData = function() {
 
     // Mute rate as division (bars, beats, ticks)
     var muteDivision = muteSeq.division || [1, 0, 0];
-    if (Array.isArray(muteDivision)) {
-        data.push(muteDivision[0] || 0);
-        data.push(muteDivision[1] || 0);
-        data.push(muteDivision[2] || 0);
-    } else {
-        data.push(1, 0, 0);
-    }
+    data.push(muteDivision[0] || 0);
+    data.push(muteDivision[1] || 0);
+    data.push(muteDivision[2] || 0);
 
     // Mute position
     data.push(muteSeq.currentStep);
@@ -1151,13 +1037,9 @@ SequencerDevice.prototype.buildStateData = function() {
 
     // Pitch rate as division (bars, beats, ticks)
     var pitchDivision = pitchSeq.division || [1, 0, 0];
-    if (Array.isArray(pitchDivision)) {
-        data.push(pitchDivision[0] || 0);
-        data.push(pitchDivision[1] || 0);
-        data.push(pitchDivision[2] || 0);
-    } else {
-        data.push(1, 0, 0);
-    }
+    data.push(pitchDivision[0] || 0);
+    data.push(pitchDivision[1] || 0);
+    data.push(pitchDivision[2] || 0);
 
     // Pitch position
     data.push(pitchSeq.currentStep);
@@ -1172,7 +1054,7 @@ SequencerDevice.prototype.buildStateData = function() {
  * Broadcast state to OSC output (outlet 1).
  * Sends state_broadcast with origin tag for external listeners.
  *
- * V6.0 Format (29 args):
+ * Format (29 args):
  *   state_broadcast, trackIndex, origin, mutePattern[8], muteLength,
  *   muteBars, muteBeats, muteTicks, mutePosition, pitchPattern[8],
  *   pitchLength, pitchBars, pitchBeats, pitchTicks, pitchPosition, temperature
@@ -1201,7 +1083,6 @@ SequencerDevice.prototype.broadcastToOSC = function(origin, stateData) {
     outlet.apply(null, [1].concat(args));
 };
 
-
 /**
  * Broadcast combined sequencer state for multi-track display.
  *
@@ -1214,7 +1095,7 @@ SequencerDevice.prototype.broadcastState = function(origin) {
     this.broadcastToOSC(origin, data);
 };
 
-// ===== INLET-AWARE MESSAGE HANDLERS (Phase 3) =====
+// ===== INLET-AWARE MESSAGE HANDLERS =====
 
 /**
  * Handle transport messages from inlet 0.
@@ -1359,16 +1240,12 @@ SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
 };
 
 /**
- * Handle clip change event - resets sequencer state.
- * V3.1: Also handles temperature state cleanup and re-capture.
- * Called when user switches to a different clip.
+ * Handle clip change event.
+ * Cleans up temperature state for old clip, re-captures for new clip if active.
  */
 SequencerDevice.prototype.onClipChanged = function() {
-    // V3.1: Handle temperature state on clip change
-    // Clear old clip's state to prevent memory accumulation
-    // Re-capture for new clip if temperature is still active
     if (Object.keys(this.temperatureState).length > 0) {
-        this.temperatureState = {};  // Clear all old clip states
+        this.temperatureState = {};
         debug("onClipChanged", "Cleared temperature state for old clip");
     }
 
@@ -1381,20 +1258,13 @@ SequencerDevice.prototype.onClipChanged = function() {
         }
     }
 
-    // V3.0: lastValues are tracked per clipId, so no need to clear
-    // Just clear sequencer caches
-    for (var name in this.sequencers) {
-        if (this.sequencers.hasOwnProperty(name)) {
-            this.sequencers[name].invalidateCache();
-            this.sequencers[name].lastState = null;
-        }
-    }
+    // lastValues are tracked per clipId, so no need to clear on clip change
 };
 
 // ===== STATE PERSISTENCE =====
 
 /**
- * Get current device state for saving/persistence (v3.0 format).
+ * Get current device state for saving/persistence.
  * @returns {Object} - Device state including all sequencer patterns and settings
  */
 SequencerDevice.prototype.getState = function() {
@@ -1422,50 +1292,28 @@ SequencerDevice.prototype.getState = function() {
 };
 
 /**
- * Restore device state from saved data (supports v1.x, v2.0, v2.1, v3.0, and v3.1 formats).
+ * Restore device state from saved data.
  * @param {Object} state - Saved device state
  */
 SequencerDevice.prototype.setState = function(state) {
-    // Handle v3.1, v3.0, v2.1, and v2.0 formats
-    if ((state.version === '3.1' || state.version === '3.0' || state.version === '2.1' || state.version === '2.0') && state.sequencers) {
-        for (var name in state.sequencers) {
-            if (state.sequencers.hasOwnProperty(name) && this.sequencers[name + 'Sequencer']) {
-                var savedSeq = state.sequencers[name];
-                var seq = this.sequencers[name + 'Sequencer'];
+    if (!state.sequencers) return;
 
-                if (savedSeq.pattern) seq.setPattern(savedSeq.pattern);
-                if (savedSeq.patternLength) seq.setLength(savedSeq.patternLength);
-                // Note: 'enabled' no longer restored - derived from pattern content
-                if (savedSeq.division) seq.setDivision(savedSeq.division, this.timeSignatureNumerator);
+    for (var name in state.sequencers) {
+        if (state.sequencers.hasOwnProperty(name) && this.sequencers[name + 'Sequencer']) {
+            var savedSeq = state.sequencers[name];
+            var seq = this.sequencers[name + 'Sequencer'];
 
-                // UI feedback only — caller handles broadcast
-                this.sendSequencerState(name);
-            }
-        }
+            if (savedSeq.pattern) seq.setPattern(savedSeq.pattern);
+            if (savedSeq.patternLength) seq.setLength(savedSeq.patternLength);
+            if (savedSeq.division) seq.setDivision(savedSeq.division, this.timeSignatureNumerator);
 
-        // v3.1: Restore temperature
-        if (state.temperature !== undefined) {
-            this.setTemperatureValue(state.temperature);
-            this.sendTemperatureState();
+            this.sendSequencerState(name);
         }
     }
-    // Handle legacy v1.x format (backward compatibility)
-    else {
-        if (state.mute && this.sequencers.muteSequencer) {
-            var muteSeq = this.sequencers.muteSequencer;
-            if (state.mute.pattern) muteSeq.setPattern(state.mute.pattern);
-            if (state.mute.patternLength) muteSeq.setLength(state.mute.patternLength);
-            if (state.mute.division) muteSeq.setDivision(state.mute.division, this.timeSignatureNumerator);
-            this.sendSequencerState('mute');
-        }
 
-        if (state.pitch && this.sequencers.pitchSequencer) {
-            var pitchSeq = this.sequencers.pitchSequencer;
-            if (state.pitch.pattern) pitchSeq.setPattern(state.pitch.pattern);
-            if (state.pitch.patternLength) pitchSeq.setLength(state.pitch.patternLength);
-            if (state.pitch.division) pitchSeq.setDivision(state.pitch.division, this.timeSignatureNumerator);
-            this.sendSequencerState('pitch');
-        }
+    if (state.temperature !== undefined) {
+        this.setTemperatureValue(state.temperature);
+        this.sendTemperatureState();
     }
 };
 
@@ -1473,11 +1321,8 @@ SequencerDevice.prototype.setState = function(state) {
 var sequencer = new SequencerDevice();
 
 // ===== MAX MESSAGE HANDLERS =====
-// Named global functions exposed to Max for message handling.
-// With Phase 3 inlet separation, most messages route through anything() which
-// delegates to handleTransport(), handleOSCCommand(), or handleMaxUICommand()
-// based on the inlet global. init/bang/clip_changed/notifydeleted remain as
-// named globals called directly by Max, not via inlet routing.
+// Global functions exposed to Max. Most messages route through anything()
+// which delegates by inlet. init/clip_changed/notifydeleted are called directly.
 
 function init() {
     sequencer.init();
@@ -1500,16 +1345,8 @@ function setState(stateJson) {
     }
 }
 
-
-// Main message handler
-function msg_int() {
-}
-
-function msg_float() {
-}
-
 /**
- * Inlet-aware message router (Phase 3).
+ * Inlet-aware message router.
  * Routes messages to the appropriate handler based on which inlet they arrive on.
  *
  * Inlet 0: Transport messages (song_time)

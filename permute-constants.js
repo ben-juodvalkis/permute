@@ -1,10 +1,7 @@
 /**
  * permute-constants.js - Constants, configuration, and value types
  *
- * Extracted from permute-device.js during Phase 3 modularization.
  * No dependencies.
- *
- * @version 3.1
  */
 
 // ===== Configuration =====
@@ -43,33 +40,14 @@ var TASK_SCHEDULE_DELAY = 1;
 // ===== VALUE TYPES =====
 
 /**
- * Value type definitions for different sequencer types.
+ * Value type definitions for sequencer patterns.
  * Each type defines validation, default value, and range.
  */
 var VALUE_TYPES = {
     binary: {
         validate: function(v) { return v === 0 || v === 1; },
         default: 0,
-        range: [0, 1],
-        description: "On/Off (0 or 1)"
-    },
-    midi_range: {
-        validate: function(v) { return v >= MIDI_MIN && v <= MIDI_MAX; },
-        default: 64,
-        range: [MIDI_MIN, MIDI_MAX],
-        description: "MIDI value (0-127)"
-    },
-    normalized: {
-        validate: function(v) { return v >= 0.0 && v <= 1.0; },
-        default: 0.5,
-        range: [0.0, 1.0],
-        description: "Normalized (0.0-1.0)"
-    },
-    semitones: {
-        validate: function(v) { return v >= -48 && v <= 48; },
-        default: 0,
-        range: [-48, 48],
-        description: "Semitones (-48 to +48)"
+        range: [0, 1]
     }
 };
 

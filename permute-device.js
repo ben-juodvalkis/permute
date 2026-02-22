@@ -10,8 +10,8 @@
  */
 
 autowatch = 1;
-inlets = 1;
-outlets = 1; // UI feedback only
+inlets = 3;  // 0: Transport (song_time), 1: OSC commands, 2: Max UI commands
+outlets = 2; // 0: UI feedback, 1: OSC broadcasts
 
 // ===== MODULE IMPORTS =====
 var constants = require('permute-constants');
@@ -93,8 +93,7 @@ function SequencerDevice() {
     // V3.0: Batching queue
     this.pendingApplies = {}; // clipId -> { mute, pitch, scheduled, task }
 
-    // Initialization lifecycle flag - prevents pattr_state output during init/restore window
-    this.initialized = false;
+
 
     // State management objects
     this.trackState = new TrackState();
@@ -119,10 +118,6 @@ function SequencerDevice() {
     this.commandRegistry = new CommandRegistry();
     this.setupCommandHandlers();
 
-    // Legacy compatibility - keep references for old code paths
-    // FIXED: Renamed to avoid collision with mute() function
-    this.muteSeq = this.sequencers.muteSequencer;
-    this.pitchSeq = this.sequencers.pitchSequencer;
 }
 
 /**
@@ -139,74 +134,7 @@ SequencerDevice.prototype.generateDeviceId = function() {
 SequencerDevice.prototype.setupCommandHandlers = function() {
     var self = this;
 
-    // Song time handler - single message drives both sequencers
-    // Receives absolute tick position from Max transport every 16th note
-    this.commandRegistry.register('song_time', function(args) {
-        if (args.length >= 1) {
-            var ticks = args[0];
-            self.processWithSongTime(ticks);
-        }
-    });
-
-    // Legacy sequencer commands (for backward compatibility during migration)
-    this.commandRegistry.register('tick', function(args) {
-        if (args.length > 1) {
-            self.processSequencerTick(args.seqName, args[1]);
-        }
-    });
-
-    this.commandRegistry.register('pattern', function(args) {
-        var seq = args.seq;
-        seq.pattern = args.slice(1);
-        seq.patternLength = seq.pattern.length;
-        self.sendSequencerFeedback(args.seqName);
-    });
-
-    this.commandRegistry.register('step', function(args) {
-        if (args.length > 2) {
-            var seq = args.seq;
-            var index = args[1];
-            var value = args[2];
-            if (index >= 0 && index < seq.pattern.length) {
-                seq.pattern[index] = value;
-                self.sendSequencerFeedback(args.seqName);
-            }
-        }
-    });
-
-    // Note: 'enable' command removed - sequencers auto-activate based on pattern content
-
-    this.commandRegistry.register('division', function(args) {
-        var seq = args.seq;
-        if (args.length === 4) {
-            seq.division = [args[1], args[2], args[3]];
-        } else if (args.length === 2) {
-            seq.division = args[1];
-        }
-        seq.ticksPerStep = self.getTicksPerStep(seq.division);
-    });
-
-    this.commandRegistry.register('length', function(args) {
-        var seq = args.seq;
-        seq.patternLength = Math.max(MIN_PATTERN_LENGTH, Math.min(MAX_PATTERN_LENGTH, args[1]));
-        if (seq.currentStep >= seq.patternLength) {
-            seq.currentStep = 0;
-        }
-    });
-
-    this.commandRegistry.register('reset', function(args) {
-        var seq = args.seq;
-        seq.currentStep = 0;
-        self.sendSequencerFeedback(args.seqName);
-    });
-
-    this.commandRegistry.register('bypass', function(args) {
-        if (args.seqName === 'mute') {
-            args.seq.bypass = args[1] !== 0;
-        }
-    });
-
-    // ===== OSC COMMAND HANDLERS (Phase 2) =====
+    // ===== OSC COMMAND HANDLERS =====
     // These handlers receive commands from Svelte UI via OSC bridge
     // All commands include deviceId as first arg for filtering
 
@@ -217,57 +145,45 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
 
     // Mute sequencer commands
     this.commandRegistry.register('seq_mute_step', function(args) {
-        // args: [deviceId, stepIndex, value]
         if (args.length < 3 || !isForThisDevice(args[0])) return;
-        var stepIndex = parseInt(args[1]);
-        var value = parseInt(args[2]);
-        self.sequencers.muteSequencer.setStep(stepIndex, value);
+        self.sequencers.muteSequencer.setStep(parseInt(args[1]), parseInt(args[2]));
+        self.sendSequencerState('mute');
         self.broadcastState('mute_step');
     });
 
     this.commandRegistry.register('seq_mute_length', function(args) {
-        // args: [deviceId, length]
         if (args.length < 2 || !isForThisDevice(args[0])) return;
-        var length = parseInt(args[1]);
-        self.sequencers.muteSequencer.setLength(length);
+        self.sequencers.muteSequencer.setLength(parseInt(args[1]));
+        self.sendSequencerState('mute');
         self.broadcastState('mute_length');
     });
 
     this.commandRegistry.register('seq_mute_rate', function(args) {
-        // args: [deviceId, bars, beats, ticks]
         if (args.length < 4 || !isForThisDevice(args[0])) return;
-        var bars = parseInt(args[1]);
-        var beats = parseInt(args[2]);
-        var ticks = parseInt(args[3]);
-        self.sequencers.muteSequencer.setDivision([bars, beats, ticks], self.timeSignatureNumerator);
+        self.sequencers.muteSequencer.setDivision([parseInt(args[1]), parseInt(args[2]), parseInt(args[3])], self.timeSignatureNumerator);
+        self.sendSequencerState('mute');
         self.broadcastState('mute_rate');
     });
 
     // Pitch sequencer commands
     this.commandRegistry.register('seq_pitch_step', function(args) {
-        // args: [deviceId, stepIndex, value]
         if (args.length < 3 || !isForThisDevice(args[0])) return;
-        var stepIndex = parseInt(args[1]);
-        var value = parseInt(args[2]);
-        self.sequencers.pitchSequencer.setStep(stepIndex, value);
+        self.sequencers.pitchSequencer.setStep(parseInt(args[1]), parseInt(args[2]));
+        self.sendSequencerState('pitch');
         self.broadcastState('pitch_step');
     });
 
     this.commandRegistry.register('seq_pitch_length', function(args) {
-        // args: [deviceId, length]
         if (args.length < 2 || !isForThisDevice(args[0])) return;
-        var length = parseInt(args[1]);
-        self.sequencers.pitchSequencer.setLength(length);
+        self.sequencers.pitchSequencer.setLength(parseInt(args[1]));
+        self.sendSequencerState('pitch');
         self.broadcastState('pitch_length');
     });
 
     this.commandRegistry.register('seq_pitch_rate', function(args) {
-        // args: [deviceId, bars, beats, ticks]
         if (args.length < 4 || !isForThisDevice(args[0])) return;
-        var bars = parseInt(args[1]);
-        var beats = parseInt(args[2]);
-        var ticks = parseInt(args[3]);
-        self.sequencers.pitchSequencer.setDivision([bars, beats, ticks], self.timeSignatureNumerator);
+        self.sequencers.pitchSequencer.setDivision([parseInt(args[1]), parseInt(args[2]), parseInt(args[3])], self.timeSignatureNumerator);
+        self.sendSequencerState('pitch');
         self.broadcastState('pitch_rate');
     });
 
@@ -276,8 +192,8 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
         // args: [deviceId, value]
         if (args.length < 2 || !isForThisDevice(args[0])) return;
         var value = parseFloat(args[1]);
-        // Reuse existing temperature logic
         self.setTemperatureValue(value);
+        self.sendTemperatureState();
         self.broadcastState('temperature');
     });
 
@@ -287,7 +203,7 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
         //        pitchPattern[8], pitchLength, pitchBars, pitchBeats, pitchTicks, temperature]
         // Total: 26 args (1 + 8 + 1 + 3 + 8 + 1 + 3 + 1)
         debug("set_state", "Received " + args.length + " args, deviceId=" + args[0]);
-        if (args.length < 24) {
+        if (args.length < 26) {
             debug("set_state", "REJECTED: not enough args");
             return;
         }
@@ -316,7 +232,7 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
 
         // Pitch pattern (8 steps)
         var pitchPattern = [];
-        for (var i = 0; i < 8; i++) {
+        for (var j = 0; j < 8; j++) {
             pitchPattern.push(parseInt(args[idx++]));
         }
         self.sequencers.pitchSequencer.setPattern(pitchPattern);
@@ -331,6 +247,11 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
         // Temperature
         var temp = parseFloat(args[idx++]);
         self.setTemperatureValue(temp);
+        self.sendTemperatureState();
+
+        // Send sequencer state to UI
+        self.sendSequencerState('mute');
+        self.sendSequencerState('pitch');
 
         self.broadcastState('set_state_ack');
     });
@@ -384,22 +305,9 @@ SequencerDevice.prototype.init = function() {
                 instrumentType: this.instrumentType
             });
 
-            // Send initial feedback for all sequencers (UI feedback only, no broadcast)
-            for (var seqName in this.sequencers) {
-                if (this.sequencers.hasOwnProperty(seqName)) {
-                    var cleanName = seqName.replace('Sequencer', '');
-                    this.sendSequencerFeedbackLocal(cleanName);
-                }
-            }
-
-            // If restoreState() ran before init(), patterns may already be active
-            // but observers weren't created (Live API wasn't ready). Check now.
-            this.checkAndActivateObservers();
-
-            // Send initial state broadcast with 'init' origin
-            this.broadcastState('init');
-
-            this.initialized = true;
+            // Request UI elements to re-emit their persisted values
+            // UI elements are the source of truth — their values become the initial state
+            outlet(0, "request_ui_values", 1);
         } else {
             handleError("init", "Could not find track reference", true);
         }
@@ -423,6 +331,11 @@ SequencerDevice.prototype.setupDeviceObserver = function() {
         "devices",
         function(args) {
             defer(function() {
+                // V5.0: Revert current transpose before re-detecting, so we
+                // don't capture a shifted value as the new "original".
+                if (self.instrumentType === 'parameter_transpose') {
+                    self.instrumentStrategy.revertTranspose();
+                }
                 // V3.0: Re-detect instrument type on device changes
                 self.detectInstrumentType();
             });
@@ -513,8 +426,8 @@ SequencerDevice.prototype.checkAndActivateObservers = function() {
     if (this.playbackObserversActive) return;
 
     // Don't create observers before init() has established the track reference.
-    // restoreState() fires before init() and calls setPattern() which triggers this,
-    // but Live API isn't ready yet. init() calls this again after setup.
+    // UI elements may send restored values before init(), but Live API isn't ready yet.
+    // init() calls this again after setup.
     if (!this.trackState.ref) return;
 
     // Check if either sequencer is now active
@@ -556,8 +469,12 @@ SequencerDevice.prototype.onTransportStart = function() {
     debug("transport", "Transport started");
     this.transportState.setPlaying(true);
 
-    // Detect instrument type for pitch transformation
-    this.detectInstrumentType();
+    // V5.0: Do NOT call detectInstrumentType() here.
+    // It creates a new TransposeStrategy instance, discarding the preserved
+    // originalTranspose value and causing runaway octave shifting on quick
+    // stop/start cycles (the deferred revert may not have landed yet when
+    // the new strategy reads the param). Instrument detection is already
+    // handled by init() and the device observer (setupDeviceObserver).
 
     // V3.1: If temperature was set before transport started, capture state now
     if (this.temperatureValue > 0) {
@@ -602,7 +519,7 @@ SequencerDevice.prototype.onTransportStop = function() {
                 seq.currentStep = -1;
                 seq.lastParameterValue = undefined;
                 var cleanName = name.replace('Sequencer', '');
-                this.sendSequencerFeedback(cleanName);
+                this.sendSequencerPosition(cleanName);
             }
         }
         return;
@@ -693,9 +610,8 @@ SequencerDevice.prototype.onTransportStop = function() {
             seq.currentStep = -1;
             seq.lastParameterValue = undefined;  // V4.1: Reset for next transport start
 
-            // Send updated feedback
             var cleanName = name.replace('Sequencer', '');
-            this.sendSequencerFeedback(cleanName);
+            this.sendSequencerPosition(cleanName);
         }
     }
 
@@ -1016,25 +932,6 @@ SequencerDevice.prototype.getCurrentClip = function() {
 // ===== SHARED SEQUENCER FUNCTIONALITY =====
 
 /**
- * Generic handler for sequencer messages (used by both mute and pitch sequencers)
- * @param {Object} seq - The sequencer object
- * @param {String} seqName - Name of sequencer ('mute' or 'pitch')
- * @param {Array} args - Message arguments
- */
-SequencerDevice.prototype.handleSequencerMessage = function(seq, seqName, args) {
-    var parameter = args[0];
-
-    // Augment args with context for command handlers
-    args.seq = seq;
-    args.seqName = seqName;
-
-    // Use command registry
-    if (!this.commandRegistry.execute(parameter, args, this)) {
-        debug("handleSequencerMessage", "Unknown command: " + parameter);
-    }
-};
-
-/**
  * Convert bar.beat.tick format to absolute tick count.
  * Uses actual time signature from Live set for accurate conversion.
  * @param {number} bars - Number of bars
@@ -1130,7 +1027,7 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, ticks) {
                 this.instrumentStrategy.applyTranspose(shouldShiftUp);
                 seq.lastParameterValue = value;
             }
-            this.sendSequencerFeedback(seqName);
+            this.sendSequencerPosition(seqName);
             return;
         }
 
@@ -1140,65 +1037,145 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, ticks) {
             this.scheduleBatchApply(clip.id, seqName, value);
         }
 
-        this.sendSequencerFeedback(seqName);
+        this.sendSequencerPosition(seqName);
     } catch (error) {
         handleError("processSequencerTick:" + seqName, error, false);
     }
 };
 
 /**
- * Send feedback to Max UI only (no OSC broadcast).
- * Used during init to avoid triggering 'position' origin broadcasts.
+ * Send full sequencer state to Max UI (outlet 0).
+ * Called only when state actually changes (init, setState, UI command).
  *
  * @param {string} seqName - Sequencer name ('mute', 'pitch', etc.)
  */
-SequencerDevice.prototype.sendSequencerFeedbackLocal = function(seqName) {
+SequencerDevice.prototype.sendSequencerState = function(seqName) {
     var seq = this.sequencers[seqName + 'Sequencer'];
     if (!seq) return;
 
-    // Update first 8 step toggles (Max UI displays 8 steps)
+    // Step values (8 individual messages)
     for (var i = 0; i < 8; i++) {
         var value = (i < seq.pattern.length) ? seq.pattern[i] : seq.valueType.default;
         outlet(0, seqName + "_step_" + i, value);
     }
 
-    // Current step indicator
-    outlet(0, seqName + "_current", seq.currentStep);
+    // Length
+    outlet(0, seqName + "_length", seq.patternLength);
 
-    // Active state (derived from pattern content)
+    // Division (bars, beats, ticks)
+    outlet(0, seqName + "_division", seq.division[0], seq.division[1], seq.division[2]);
+
+    // Current step and active state
+    outlet(0, seqName + "_current", seq.currentStep);
     outlet(0, seqName + "_active", seq.isActive() ? 1 : 0);
 };
 
 /**
- * Generic feedback sender for any sequencer.
- * Sends pattern, current step, and active state to Max UI.
- * Also broadcasts state for multi-track display (used during playback).
+ * Send only the current step position to Max UI (outlet 0) and OSC.
+ * Called on every sequencer tick during playback — kept minimal for efficiency.
  *
  * @param {string} seqName - Sequencer name ('mute', 'pitch', etc.)
  */
-SequencerDevice.prototype.sendSequencerFeedback = function(seqName) {
-    // Send local feedback to Max UI
-    this.sendSequencerFeedbackLocal(seqName);
+SequencerDevice.prototype.sendSequencerPosition = function(seqName) {
+    var seq = this.sequencers[seqName + 'Sequencer'];
+    if (!seq) return;
 
-    // Broadcast state for multi-track sequencer display
-    // During playback, this is a position update
+    outlet(0, seqName + "_current", seq.currentStep);
     this.broadcastState('position');
 };
 
 /**
- * Broadcast combined sequencer state for multi-track display.
- * Sends a single OSC message containing all sequencer state for this track.
+ * Send temperature value to Max UI (outlet 0).
+ * Called when temperature changes from OSC or on init/setState.
+ */
+SequencerDevice.prototype.sendTemperatureState = function() {
+    outlet(0, "temperature", this.temperatureValue || 0.0);
+};
+
+/**
+ * Build state data array for OSC broadcasts.
+ * Returns the raw data (without message selector or origin).
  *
- * V6.0 Format (29 args - enabled flags removed, derived from pattern):
- *   trackIndex (0),
- *   origin (1),
- *   mutePattern[8] (2-9),
- *   muteLength (10), muteBars (11), muteBeats (12), muteTicks (13),
- *   mutePosition (14),
- *   pitchPattern[8] (15-22),
- *   pitchLength (23), pitchBars (24), pitchBeats (25), pitchTicks (26),
- *   pitchPosition (27),
- *   temperature (28)
+ * Format (27 values):
+ *   trackIndex,
+ *   mutePattern[8], muteLength, muteBars, muteBeats, muteTicks, mutePosition,
+ *   pitchPattern[8], pitchLength, pitchBars, pitchBeats, pitchTicks, pitchPosition,
+ *   temperature
+ *
+ * @returns {Array|null} - State data array, or null if not ready
+ */
+SequencerDevice.prototype.buildStateData = function() {
+    var trackIndex = this.trackState.index;
+
+    // Skip if track index not yet determined
+    if (trackIndex < 0) return null;
+
+    var muteSeq = this.sequencers.muteSequencer;
+    var pitchSeq = this.sequencers.pitchSequencer;
+
+    // Skip if sequencers not initialized
+    if (!muteSeq || !pitchSeq) return null;
+
+    var data = [trackIndex];
+
+    // Mute pattern (8 steps)
+    for (var i = 0; i < 8; i++) {
+        var value = (i < muteSeq.pattern.length) ? muteSeq.pattern[i] : muteSeq.valueType.default;
+        data.push(value);
+    }
+
+    // Mute length
+    data.push(muteSeq.patternLength);
+
+    // Mute rate as division (bars, beats, ticks)
+    var muteDivision = muteSeq.division || [1, 0, 0];
+    if (Array.isArray(muteDivision)) {
+        data.push(muteDivision[0] || 0);
+        data.push(muteDivision[1] || 0);
+        data.push(muteDivision[2] || 0);
+    } else {
+        data.push(1, 0, 0);
+    }
+
+    // Mute position
+    data.push(muteSeq.currentStep);
+
+    // Pitch pattern (8 steps)
+    for (var i = 0; i < 8; i++) {
+        var value = (i < pitchSeq.pattern.length) ? pitchSeq.pattern[i] : pitchSeq.valueType.default;
+        data.push(value);
+    }
+
+    // Pitch length
+    data.push(pitchSeq.patternLength);
+
+    // Pitch rate as division (bars, beats, ticks)
+    var pitchDivision = pitchSeq.division || [1, 0, 0];
+    if (Array.isArray(pitchDivision)) {
+        data.push(pitchDivision[0] || 0);
+        data.push(pitchDivision[1] || 0);
+        data.push(pitchDivision[2] || 0);
+    } else {
+        data.push(1, 0, 0);
+    }
+
+    // Pitch position
+    data.push(pitchSeq.currentStep);
+
+    // Temperature
+    data.push(this.temperatureValue || 0.0);
+
+    return data;
+};
+
+/**
+ * Broadcast state to OSC output (outlet 1).
+ * Sends state_broadcast with origin tag for external listeners.
+ *
+ * V6.0 Format (29 args):
+ *   state_broadcast, trackIndex, origin, mutePattern[8], muteLength,
+ *   muteBars, muteBeats, muteTicks, mutePosition, pitchPattern[8],
+ *   pitchLength, pitchBars, pitchBeats, pitchTicks, pitchPosition, temperature
  *
  * Origin values:
  *   'init'          - Device just initialized
@@ -1211,92 +1188,174 @@ SequencerDevice.prototype.sendSequencerFeedback = function(seqName) {
  *   'pitch_rate'    - Pitch rate changed via OSC
  *   'temperature'   - Temperature changed via OSC
  *   'position'      - Playhead moved (during playback)
- *   'pattr_restore' - Restored from Live Set / pattr
  *
- * This is routed by Max patch to: /looping/sequencer/state
+ * @param {string} origin - Why this broadcast is happening
+ * @param {Array} [stateData] - Pre-built state data (optional, builds if not provided)
+ */
+SequencerDevice.prototype.broadcastToOSC = function(origin, stateData) {
+    var data = stateData || this.buildStateData();
+    if (!data) return;
+
+    // Insert origin after trackIndex: [state_broadcast, trackIndex, origin, ...data]
+    var args = ["state_broadcast", data[0], origin].concat(data.slice(1));
+    outlet.apply(null, [1].concat(args));
+};
+
+
+/**
+ * Broadcast combined sequencer state for multi-track display.
  *
  * @param {string} origin - Why this broadcast is happening (default: 'unknown')
  */
 SequencerDevice.prototype.broadcastState = function(origin) {
     origin = origin || 'unknown';
-    var trackIndex = this.trackState.index;
+    var data = this.buildStateData();
+    if (!data) return;
+    this.broadcastToOSC(origin, data);
+};
 
-    // Skip if track index not yet determined
-    if (trackIndex < 0) return;
+// ===== INLET-AWARE MESSAGE HANDLERS (Phase 3) =====
 
-    var muteSeq = this.sequencers.muteSequencer;
-    var pitchSeq = this.sequencers.pitchSequencer;
+/**
+ * Handle transport messages from inlet 0.
+ * Processes song_time messages to drive sequencer playback.
+ *
+ * @param {string} messageName - Message name (e.g., 'song_time')
+ * @param {Array} args - Message arguments
+ */
+SequencerDevice.prototype.handleTransport = function(messageName, args) {
+    if (messageName === 'song_time' && args.length >= 1) {
+        this.processWithSongTime(args[0]);
+    }
+};
 
-    // Skip if sequencers not initialized
-    if (!muteSeq || !pitchSeq) return;
-
-    var args = ["state_broadcast", trackIndex, origin];
-
-    // Mute pattern (8 steps) - args 1-8
-    for (var i = 0; i < 8; i++) {
-        var value = (i < muteSeq.pattern.length) ? muteSeq.pattern[i] : muteSeq.valueType.default;
-        args.push(value);
+/**
+ * Handle OSC commands from inlet 1.
+ * Parses /looping/sequencer/ addresses and routes to command handlers.
+ * OSC commands update state and broadcast to OSC.
+ *
+ * @param {string} address - OSC address (e.g., '/looping/sequencer/mute/step')
+ * @param {Array} args - Message arguments
+ */
+SequencerDevice.prototype.handleOSCCommand = function(address, args) {
+    // Only handle /looping/sequencer/ messages
+    if (address.indexOf('/looping/sequencer/') !== 0) {
+        debug("handleOSCCommand", "Ignoring non-sequencer address: " + address);
+        return;
     }
 
-    // Mute length - arg 9
-    args.push(muteSeq.patternLength);
+    // Strip prefix and convert to command name
+    var path = address.replace('/looping/sequencer/', '');
+    var parts = path.split('/');
+    var command;
 
-    // Mute rate as division (bars, beats, ticks) - args 10-12
-    var muteDivision = muteSeq.division || [1, 0, 0];
-    if (Array.isArray(muteDivision)) {
-        args.push(muteDivision[0] || 0);  // bars
-        args.push(muteDivision[1] || 0);  // beats
-        args.push(muteDivision[2] || 0);  // ticks
+    if (parts[0] === 'set' && parts[1] === 'state') {
+        command = 'set_state';
+    } else if (parts[0] === 'temperature') {
+        command = 'seq_temperature';
+    } else if (parts.length === 2) {
+        // mute/step, mute/length, mute/rate, pitch/step, etc.
+        command = 'seq_' + parts[0] + '_' + parts[1];
     } else {
-        // Legacy string format - convert to default
-        args.push(1, 0, 0);  // default 1 bar
+        debug("handleOSCCommand", "Unknown OSC command: " + address);
+        return;
     }
 
-    // Mute position - arg 13 (enabled removed - derived from pattern)
-    args.push(muteSeq.currentStep);
+    debug("handleOSCCommand", "OSC -> " + command + " " + args.join(" "));
+    this.commandRegistry.execute(command, args, this);
+};
 
-    // Pitch pattern (8 steps) - args 14-21
-    for (var i = 0; i < 8; i++) {
-        var value = (i < pitchSeq.pattern.length) ? pitchSeq.pattern[i] : pitchSeq.valueType.default;
-        args.push(value);
+/**
+ * Handle Max UI commands from inlet 2.
+ * Message names are symmetrical with outlet 0 feedback (e.g., mute_steps in, mute_step_N out).
+ *
+ * @param {string} messageName - Message name (e.g., 'mute_steps', 'mute_length')
+ * @param {Array} args - Message arguments
+ */
+SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
+    debug("handleMaxUICommand", messageName + " " + args.join(" "));
+
+    // Mute/pitch step grids — full 8-value row
+    if (messageName === 'mute_steps' || messageName === 'pitch_steps') {
+        var seqName = (messageName === 'mute_steps') ? 'mute' : 'pitch';
+        var seq = this.sequencers[seqName + 'Sequencer'];
+        var pattern = [];
+        for (var i = 0; i < args.length; i++) {
+            pattern.push(parseInt(args[i]));
+        }
+        // Skip if unchanged (break feedback loop)
+        var unchanged = (pattern.length === seq.pattern.length);
+        if (unchanged) {
+            for (var i = 0; i < pattern.length; i++) {
+                if (pattern[i] !== seq.pattern[i]) { unchanged = false; break; }
+            }
+        }
+        if (unchanged) return;
+        seq.setPattern(pattern);
+        this.broadcastToOSC(seqName + '_pattern');
+        return;
     }
 
-    // Pitch length - arg 22
-    args.push(pitchSeq.patternLength);
-
-    // Pitch rate as division (bars, beats, ticks) - args 23-25
-    var pitchDivision = pitchSeq.division || [1, 0, 0];
-    if (Array.isArray(pitchDivision)) {
-        args.push(pitchDivision[0] || 0);  // bars
-        args.push(pitchDivision[1] || 0);  // beats
-        args.push(pitchDivision[2] || 0);  // ticks
-    } else {
-        // Legacy string format - convert to default
-        args.push(1, 0, 0);  // default 1 bar
+    // Mute/pitch length
+    if (messageName === 'mute_length' || messageName === 'pitch_length') {
+        var seqName = (messageName === 'mute_length') ? 'mute' : 'pitch';
+        var seq = this.sequencers[seqName + 'Sequencer'];
+        if (args.length >= 1) {
+            var newLength = parseInt(args[0]);
+            if (newLength === seq.patternLength) return;  // Skip if unchanged
+            seq.setLength(newLength);
+            this.broadcastToOSC(seqName + '_length');
+        }
+        return;
     }
 
-    // Pitch position - arg 26 (enabled removed - derived from pattern)
-    args.push(pitchSeq.currentStep);
-
-    // Temperature - arg 27
-    args.push(this.temperatureValue || 0.0);
-
-    // Send via outlet 0 - Max patch will route to OSC
-    outlet.apply(null, [0].concat(args));
-
-    // Also output for pattr storage (28-arg list WITHOUT origin)
-    // pattr_state format: trackIndex, mutePattern[8], muteLength, muteBars, muteBeats, muteTicks,
-    //                     mutePosition, pitchPattern[8], pitchLength, pitchBars,
-    //                     pitchBeats, pitchTicks, pitchPosition, temperature
-    // args is: ["state_broadcast", trackIndex, origin, data...]
-    // We want: ["pattr_state", trackIndex, data...] (skip origin at index 2)
-    // Skip for position updates - they happen constantly during playback and don't need persistence
-    // Skip for pattr_restore - we just loaded from pattr, no need to save back (prevents feedback loop)
-    // Skip until initialized - prevents default state from overwriting saved pattr data during startup
-    if (this.initialized && origin !== 'position' && origin !== 'pattr_restore' && origin !== 'init') {
-        var pattrArgs = ["pattr_state", args[1]].concat(args.slice(3));
-        outlet.apply(null, [0].concat(pattrArgs));
+    // Mute/pitch division (rate)
+    if (messageName === 'mute_division' || messageName === 'pitch_division') {
+        var seqName = (messageName === 'mute_division') ? 'mute' : 'pitch';
+        var seq = this.sequencers[seqName + 'Sequencer'];
+        if (args.length >= 3) {
+            var newDiv = [parseInt(args[0]), parseInt(args[1]), parseInt(args[2])];
+            // Skip if unchanged
+            if (seq.division[0] === newDiv[0] && seq.division[1] === newDiv[1] && seq.division[2] === newDiv[2]) return;
+            seq.setDivision(newDiv, this.timeSignatureNumerator);
+            this.broadcastToOSC(seqName + '_rate');
+        }
+        return;
     }
+
+    // Temperature dial
+    if (messageName === 'temperature') {
+        if (args.length >= 1) {
+            this.setTemperatureValue(parseFloat(args[0]));
+            this.broadcastToOSC('temperature');
+        }
+        return;
+    }
+
+    // Temperature reset button
+    if (messageName === 'temperature_reset') {
+        var clip = this.getCurrentClip();
+        var clipId = clip ? clip.id : null;
+        if (clipId && this.temperatureState[clipId]) {
+            this.restoreTemperatureState(clipId);
+        }
+        this.temperatureValue = 0.0;
+        this.temperatureActive = false;
+        this.clearTemperatureLoopJumpObserver();
+        this.sendTemperatureState();
+        this.broadcastToOSC('temperature');
+        return;
+    }
+
+    // Temperature shuffle button
+    if (messageName === 'temperature_shuffle') {
+        if (this.temperatureActive && this.temperatureValue > 0) {
+            this.onTemperatureLoopJump();
+        }
+        return;
+    }
+
+    debug("handleMaxUICommand", "Unknown UI message: " + messageName);
 };
 
 /**
@@ -1379,13 +1438,15 @@ SequencerDevice.prototype.setState = function(state) {
                 // Note: 'enabled' no longer restored - derived from pattern content
                 if (savedSeq.division) seq.setDivision(savedSeq.division, this.timeSignatureNumerator);
 
-                this.sendSequencerFeedback(name);
+                // UI feedback only — caller handles broadcast
+                this.sendSequencerState(name);
             }
         }
 
         // v3.1: Restore temperature
         if (state.temperature !== undefined) {
             this.setTemperatureValue(state.temperature);
+            this.sendTemperatureState();
         }
     }
     // Handle legacy v1.x format (backward compatibility)
@@ -1395,7 +1456,7 @@ SequencerDevice.prototype.setState = function(state) {
             if (state.mute.pattern) muteSeq.setPattern(state.mute.pattern);
             if (state.mute.patternLength) muteSeq.setLength(state.mute.patternLength);
             if (state.mute.division) muteSeq.setDivision(state.mute.division, this.timeSignatureNumerator);
-            this.sendSequencerFeedback('mute');
+            this.sendSequencerState('mute');
         }
 
         if (state.pitch && this.sequencers.pitchSequencer) {
@@ -1403,7 +1464,7 @@ SequencerDevice.prototype.setState = function(state) {
             if (state.pitch.pattern) pitchSeq.setPattern(state.pitch.pattern);
             if (state.pitch.patternLength) pitchSeq.setLength(state.pitch.patternLength);
             if (state.pitch.division) pitchSeq.setDivision(state.pitch.division, this.timeSignatureNumerator);
-            this.sendSequencerFeedback('pitch');
+            this.sendSequencerState('pitch');
         }
     }
 };
@@ -1412,153 +1473,13 @@ SequencerDevice.prototype.setState = function(state) {
 var sequencer = new SequencerDevice();
 
 // ===== MAX MESSAGE HANDLERS =====
-// These functions handle incoming messages from Max
-
-/**
- * Handle all mute sequencer messages.
- * Commands: pattern, step, enable, division, length, reset, bypass, tick
- */
-function mute() {
-    var args = arrayfromargs(arguments);
-    sequencer.handleSequencerMessage(sequencer.muteSeq, 'mute', args);
-}
-
-/**
- * Handle all pitch sequencer messages.
- * Commands: pattern, step, enable, division, length, reset, tick
- */
-function pitch() {
-    var args = arrayfromargs(arguments);
-    sequencer.handleSequencerMessage(sequencer.pitchSeq, 'pitch', args);
-}
-
-/**
- * Handle song time messages from Max transport.
- * V4.2: Single message drives both mute and pitch sequencers.
- *
- * Called every 16th note (120 ticks) with absolute tick position.
- * Max patch sends: song_time <ticks>
- *
- * Usage: song_time 480  (at beat 2)
- *        song_time 960  (at beat 3)
- */
-function song_time() {
-    var args = arrayfromargs(arguments);
-    if (args.length >= 1) {
-        sequencer.commandRegistry.execute('song_time', args, sequencer);
-    }
-}
-
-// ===== OSC COMMAND HANDLERS (Phase 2) =====
-// These functions handle OSC commands routed from Max patch
-// Each command includes deviceId as first arg for multi-device filtering
-
-function seq_mute_step() {
-    var args = arrayfromargs(arguments);
-    sequencer.commandRegistry.execute('seq_mute_step', args, sequencer);
-}
-
-function seq_mute_length() {
-    var args = arrayfromargs(arguments);
-    sequencer.commandRegistry.execute('seq_mute_length', args, sequencer);
-}
-
-function seq_mute_rate() {
-    var args = arrayfromargs(arguments);
-    sequencer.commandRegistry.execute('seq_mute_rate', args, sequencer);
-}
-
-function seq_pitch_step() {
-    var args = arrayfromargs(arguments);
-    sequencer.commandRegistry.execute('seq_pitch_step', args, sequencer);
-}
-
-function seq_pitch_length() {
-    var args = arrayfromargs(arguments);
-    sequencer.commandRegistry.execute('seq_pitch_length', args, sequencer);
-}
-
-function seq_pitch_rate() {
-    var args = arrayfromargs(arguments);
-    sequencer.commandRegistry.execute('seq_pitch_rate', args, sequencer);
-}
-
-function seq_temperature() {
-    var args = arrayfromargs(arguments);
-    sequencer.commandRegistry.execute('seq_temperature', args, sequencer);
-}
-
-function set_state() {
-    var args = arrayfromargs(arguments);
-    sequencer.commandRegistry.execute('set_state', args, sequencer);
-}
-
-/**
- * Handle temperature transformation messages.
- * V3.1: Value-based enable/disable with note ID tracking for reversibility.
- *
- * Behavior:
- * - temperature 0 -> >0: Capture original pitches by note ID, start shuffling
- * - temperature >0 -> 0: Restore original pitches, stop shuffling
- * - temperature >0 -> >0: Just change intensity (no re-capture)
- *
- * Usage: temperature 0.7  (capture originals if first time, start shuffling)
- *        temperature 0.0  (restore originals, stop shuffling)
- */
-function temperature() {
-    var args = arrayfromargs(arguments);
-
-    if (args.length < 1) {
-        handleError("temperature", new Error("No temperature value provided"), false);
-        return;
-    }
-
-    sequencer.setTemperatureValue(args[0]);
-}
-
-/**
- * Reset temperature to original state.
- * V3.1: Uses note ID tracking to restore original pitches.
- * Usage: temperature_reset
- */
-function temperature_reset() {
-    debug("temperature", "Reset requested");
-
-    var clip = sequencer.getCurrentClip();
-    var clipId = clip ? clip.id : null;
-
-    // V3.1: Restore original pitches if we have temperature state
-    if (clipId && sequencer.temperatureState[clipId]) {
-        sequencer.restoreTemperatureState(clipId);
-    }
-
-    // Turn off temperature
-    sequencer.temperatureValue = 0.0;
-    sequencer.temperatureActive = false;
-    sequencer.clearTemperatureLoopJumpObserver();
-}
-
-/**
- * Force new variation with current temperature.
- * V3.0: Manually triggers loop jump handler.
- * Usage: temperature_shuffle
- */
-function temperature_shuffle() {
-    if (!sequencer.temperatureActive || sequencer.temperatureValue <= 0) {
-        debug("temperature", "Shuffle requested but temperature not active");
-        return;
-    }
-
-    debug("temperature", "Manual shuffle requested");
-    sequencer.onTemperatureLoopJump();
-}
+// Named global functions exposed to Max for message handling.
+// With Phase 3 inlet separation, most messages route through anything() which
+// delegates to handleTransport(), handleOSCCommand(), or handleMaxUICommand()
+// based on the inlet global. init/bang/clip_changed/notifydeleted remain as
+// named globals called directly by Max, not via inlet routing.
 
 function init() {
-    sequencer.init();
-}
-
-// Support bang message for initialization
-function bang() {
     sequencer.init();
 }
 
@@ -1579,60 +1500,6 @@ function setState(stateJson) {
     }
 }
 
-/**
- * Restore state from pattr (28-arg list format matching ADR-166).
- * Called on Live Set load via: [route pattr_state] -> [prepend restoreState] -> v8
- *
- * Args (28 total):
- *   trackIndex (0),
- *   mutePattern[8] (1-8), muteLength (9), muteBars (10), muteBeats (11), muteTicks (12),
- *   mutePosition (13),
- *   pitchPattern[8] (14-21), pitchLength (22), pitchBars (23), pitchBeats (24), pitchTicks (25),
- *   pitchPosition (26),
- *   temperature (27)
- *
- * Note: muteEnabled/pitchEnabled removed in ADR-166 - now derived from pattern content.
- */
-function restoreState() {
-    var args = arrayfromargs(arguments);
-    debug("restoreState", "Called with " + args.length + " args");
-
-    if (args.length < 28) {
-        debug("restoreState", "Not enough args (expected 28, got " + args.length + "), skipping");
-        return;
-    }
-
-    // Parse flat 28-arg format into state object, then delegate to setState()
-    // This ensures all setter side effects fire (observer activation, timing calculation, etc.)
-    var idx = 1;  // Skip trackIndex (arg 0)
-
-    var mutePattern = [];
-    for (var i = 0; i < 8; i++) mutePattern.push(parseInt(args[idx++]));
-    var muteLength = parseInt(args[idx++]);
-    var muteDivision = [parseInt(args[idx++]), parseInt(args[idx++]), parseInt(args[idx++])];
-    idx++;  // Skip mute position (runtime state)
-
-    var pitchPattern = [];
-    for (var i = 0; i < 8; i++) pitchPattern.push(parseInt(args[idx++]));
-    var pitchLength = parseInt(args[idx++]);
-    var pitchDivision = [parseInt(args[idx++]), parseInt(args[idx++]), parseInt(args[idx++])];
-    idx++;  // Skip pitch position (runtime state)
-
-    var temp = parseFloat(args[idx++]);
-
-    sequencer.setState({
-        version: '3.1',
-        sequencers: {
-            mute: { pattern: mutePattern, patternLength: muteLength, division: muteDivision },
-            pitch: { pattern: pitchPattern, patternLength: pitchLength, division: pitchDivision }
-        },
-        temperature: temp
-    });
-
-    sequencer.initialized = true;
-    debug("restoreState", "State restored via setState(), broadcasting");
-    sequencer.broadcastState('pattr_restore');
-}
 
 // Main message handler
 function msg_int() {
@@ -1641,74 +1508,31 @@ function msg_int() {
 function msg_float() {
 }
 
-// Handle all other messages - routes OSC addresses to command handlers
+/**
+ * Inlet-aware message router (Phase 3).
+ * Routes messages to the appropriate handler based on which inlet they arrive on.
+ *
+ * Inlet 0: Transport messages (song_time)
+ * Inlet 1: OSC commands (/looping/sequencer/*)
+ * Inlet 2: Max UI commands (mute_steps, mute_length, mute_division, temperature, etc.)
+ */
 function anything() {
-    var address = messagename;
+    var msg = messagename;
     var args = arrayfromargs(arguments);
+    var inletNum = inlet;
 
-    debug("anything", "received: " + address + " args: " + args.join(", "));
-
-    // Only handle /looping/sequencer/ messages
-    if (address.indexOf('/looping/sequencer/') !== 0) {
-        return;
-    }
-
-    // Strip prefix and convert to command name
-    // /looping/sequencer/mute/step -> seq_mute_step
-    // /looping/sequencer/set/state -> set_state
-    var path = address.replace('/looping/sequencer/', '');
-    var parts = path.split('/');
-    var command;
-
-    if (parts[0] === 'set' && parts[1] === 'state') {
-        command = 'set_state';
-    } else if (parts[0] === 'temperature') {
-        command = 'seq_temperature';
-    } else if (parts.length === 2) {
-        // mute/step, mute/length, mute/rate, pitch/step, etc.
-        command = 'seq_' + parts[0] + '_' + parts[1];
-    } else {
-        debug("anything", "Unknown command: " + address);
-        return;
-    }
-
-    debug("anything", "OSC -> " + command + " " + args.join(" "));
-    sequencer.commandRegistry.execute(command, args, sequencer);
-}
-
-// Handle loadbang
-function loadbang() {
-}
-
-// ===== STATE PERSISTENCE (pattrstorage) =====
-// These functions are called by pattrstorage to save/restore state with Live Set
-
-/**
- * Called by pattrstorage when Live saves the set.
- * Returns sequencer state as JSON string.
- */
-function getvalueof() {
-    var state = sequencer.getState();
-    var json = JSON.stringify(state);
-    debug("getvalueof", "Saving state", { version: state.version, temperature: state.temperature });
-    return json;
-}
-
-/**
- * Called by pattrstorage when Live loads a set.
- * Restores sequencer state from JSON string.
- */
-function setvalueof(v) {
-    if (v && typeof v === 'string') {
-        try {
-            var state = JSON.parse(v);
-            debug("setvalueof", "Restoring state", { version: state.version });
-            sequencer.setState(state);
-            sequencer.initialized = true;
-            sequencer.broadcastState('pattr_restore');
-        } catch (e) {
-            handleError("setvalueof", e, true);
-        }
+    switch (inletNum) {
+        case 0:
+            sequencer.handleTransport(msg, args);
+            break;
+        case 1:
+            sequencer.handleOSCCommand(msg, args);
+            break;
+        case 2:
+            sequencer.handleMaxUICommand(msg, args);
+            break;
+        default:
+            debug("anything", "Unknown inlet: " + inletNum);
     }
 }
 

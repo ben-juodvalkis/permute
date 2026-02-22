@@ -1075,11 +1075,17 @@ SequencerDevice.prototype.sendSequencerFeedbackLocal = function(seqName) {
     var seq = this.sequencers[seqName + 'Sequencer'];
     if (!seq) return;
 
-    // Update first 8 step toggles (Max UI displays 8 steps)
+    // Step values (8 individual messages)
     for (var i = 0; i < 8; i++) {
         var value = (i < seq.pattern.length) ? seq.pattern[i] : seq.valueType.default;
         outlet(0, seqName + "_step_" + i, value);
     }
+
+    // Length
+    outlet(0, seqName + "_length", seq.patternLength);
+
+    // Division (bars, beats, ticks)
+    outlet(0, seqName + "_division", seq.division[0], seq.division[1], seq.division[2]);
 
     // Current step indicator
     outlet(0, seqName + "_current", seq.currentStep);
@@ -1279,25 +1285,23 @@ SequencerDevice.prototype.handleOSCCommand = function(address, args) {
 
 /**
  * Handle Max UI commands from inlet 2.
- * Processes prefixed messages from Max patch UI objects.
- * UI commands update state and broadcast to OSC (skip UI — it already reflects the change).
+ * Message names are symmetrical with outlet 0 feedback (e.g., mute_steps in, mute_step_N out).
  *
- * @param {string} messageName - Message name (e.g., 'mute_ui_steps')
+ * @param {string} messageName - Message name (e.g., 'mute_steps', 'mute_length')
  * @param {Array} args - Message arguments
  */
 SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
     debug("handleMaxUICommand", messageName + " " + args.join(" "));
 
-    // Mute/pitch step grids — full 8-value row from live.grid
-    if (messageName === 'mute_ui_steps' || messageName === 'pitch_ui_steps') {
-        var seqName = (messageName === 'mute_ui_steps') ? 'mute' : 'pitch';
+    // Mute/pitch step grids — full 8-value row
+    if (messageName === 'mute_steps' || messageName === 'pitch_steps') {
+        var seqName = (messageName === 'mute_steps') ? 'mute' : 'pitch';
         var seq = this.sequencers[seqName + 'Sequencer'];
         var pattern = [];
         for (var i = 0; i < args.length; i++) {
             pattern.push(parseInt(args[i]));
         }
-        // Break feedback loop: state_broadcast updates grid via setcell,
-        // grid re-emits row, which arrives here again. Skip if unchanged.
+        // Skip if unchanged (break feedback loop)
         var unchanged = (pattern.length === seq.pattern.length);
         if (unchanged) {
             for (var i = 0; i < pattern.length; i++) {
@@ -1311,40 +1315,43 @@ SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
     }
 
     // Mute/pitch length
-    if (messageName === 'mute_ui_length' || messageName === 'pitch_ui_length') {
-        var seqName = (messageName === 'mute_ui_length') ? 'mute' : 'pitch';
+    if (messageName === 'mute_length' || messageName === 'pitch_length') {
+        var seqName = (messageName === 'mute_length') ? 'mute' : 'pitch';
         var seq = this.sequencers[seqName + 'Sequencer'];
         if (args.length >= 1) {
             var newLength = parseInt(args[0]);
-            if (newLength === seq.patternLength) return;  // Break feedback loop
+            if (newLength === seq.patternLength) return;  // Skip if unchanged
             seq.setLength(newLength);
             this.broadcastToOSC(seqName + '_length');
-            }
+        }
         return;
     }
 
     // Mute/pitch division (rate)
-    if (messageName === 'mute_ui_division' || messageName === 'pitch_ui_division') {
-        var seqName = (messageName === 'mute_ui_division') ? 'mute' : 'pitch';
+    if (messageName === 'mute_division' || messageName === 'pitch_division') {
+        var seqName = (messageName === 'mute_division') ? 'mute' : 'pitch';
         var seq = this.sequencers[seqName + 'Sequencer'];
         if (args.length >= 3) {
-            seq.setDivision([parseInt(args[0]), parseInt(args[1]), parseInt(args[2])], this.timeSignatureNumerator);
+            var newDiv = [parseInt(args[0]), parseInt(args[1]), parseInt(args[2])];
+            // Skip if unchanged
+            if (seq.division[0] === newDiv[0] && seq.division[1] === newDiv[1] && seq.division[2] === newDiv[2]) return;
+            seq.setDivision(newDiv, this.timeSignatureNumerator);
             this.broadcastToOSC(seqName + '_rate');
-            }
+        }
         return;
     }
 
     // Temperature dial
-    if (messageName === 'temperature_ui') {
+    if (messageName === 'temperature') {
         if (args.length >= 1) {
             this.setTemperatureValue(parseFloat(args[0]));
             this.broadcastToOSC('temperature');
-            }
+        }
         return;
     }
 
     // Temperature reset button
-    if (messageName === 'temperature_reset_ui') {
+    if (messageName === 'temperature_reset') {
         var clip = this.getCurrentClip();
         var clipId = clip ? clip.id : null;
         if (clipId && this.temperatureState[clipId]) {
@@ -1358,7 +1365,7 @@ SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
     }
 
     // Temperature shuffle button
-    if (messageName === 'temperature_shuffle_ui') {
+    if (messageName === 'temperature_shuffle') {
         if (this.temperatureActive && this.temperatureValue > 0) {
             this.onTemperatureLoopJump();
         }
@@ -1528,7 +1535,7 @@ function msg_float() {
  *
  * Inlet 0: Transport messages (song_time)
  * Inlet 1: OSC commands (/looping/sequencer/*)
- * Inlet 2: Max UI commands (mute_ui_steps, temperature_ui, etc.)
+ * Inlet 2: Max UI commands (mute_steps, mute_length, mute_division, temperature, etc.)
  */
 function anything() {
     var msg = messagename;

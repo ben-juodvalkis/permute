@@ -76,10 +76,19 @@ Same format as mute.
 ```
 - `value`: Float 0.0-1.0
 
+### Chance (Note Probability)
+
+```
+/looping/sequencer/chance [deviceId, value]
+```
+- `value`: Float 0.0-1.0 (0=never plays, 1=always plays)
+
+Sets `note.probability` on every note in the current clip. MIDI tracks only.
+
 ### Complete State
 
 ```
-/looping/sequencer/set/state [deviceId, ...26 args]
+/looping/sequencer/set/state [deviceId, ...26-27 args]
 ```
 Sets everything at once. Used for ghost editing sync.
 
@@ -93,6 +102,7 @@ Sets everything at once. Used for ghost editing sync.
 | 21 | pitchLength |
 | 22-24 | pitchDivision [bars, beats, ticks] |
 | 25 | temperature |
+| 26 | chance (optional, for backward compat) |
 
 ---
 
@@ -101,10 +111,10 @@ Sets everything at once. Used for ghost editing sync.
 One message type, sent whenever state changes:
 
 ```
-/looping/sequencer/state [trackIndex, origin, ...27 state values]
+/looping/sequencer/state [trackIndex, origin, ...28 state values]
 ```
 
-**Format (29 arguments total):**
+**Format (30 arguments total):**
 
 | Index | Field | Type |
 |-------|-------|------|
@@ -119,6 +129,7 @@ One message type, sent whenever state changes:
 | 24-26 | pitchDivision | 3 integers [bars, beats, ticks] |
 | 27 | pitchPosition | Integer (-1=idle, 0-7=current step) |
 | 28 | temperature | Float (0.0-1.0) |
+| 29 | chance | Float (0.0-1.0, 1=always play) |
 
 ### Origin Values
 
@@ -136,6 +147,7 @@ The `origin` field tells the frontend WHY this broadcast occurred:
 | `pitch_rate` | OSC pitch/rate OR Max UI | Pitch division changed |
 | `pitch_pattern` | Max UI pitch_steps | Pitch pattern changed via Max UI |
 | `temperature` | OSC or Max UI temperature | Temperature changed |
+| `chance` | OSC or Max UI chance | Chance (note probability) changed |
 | `position` | Transport tick | Playhead moved to a new step |
 | `set_state_ack` | OSC set/state command | Acknowledgment of full state set |
 | `unknown` | Fallback | Should not normally occur |
@@ -180,6 +192,7 @@ Sent when user interacts with Max UI elements, or when UI elements re-emit persi
 | `temperature` | `temperature <value>` | `temperature 0.5` |
 | `temperature_reset` | `temperature_reset` | `temperature_reset` |
 | `temperature_shuffle` | `temperature_shuffle` | `temperature_shuffle` |
+| `chance` | `chance <value>` | `chance 0.75` |
 
 ### Outlet 0: JS → Max UI
 
@@ -198,9 +211,10 @@ Sent when state changes from OSC or during playback. NOT sent when the change ca
 | `pitch_current` | `pitch_current <step:int>` | Every tick during playback (-1=idle) |
 | `pitch_active` | `pitch_active <0\|1>` | When pattern becomes active/inactive |
 | `temperature` | `temperature <value:float>` | OSC changes temperature |
+| `chance` | `chance <value:float>` | OSC changes chance |
 | `request_ui_values` | `request_ui_values 1` | After init() — triggers UI re-emission |
 
-**Note:** `mute_length`, `mute_division`, `pitch_length`, `pitch_division`, and `temperature` use the same message name in both directions. The JS knows direction by inlet vs outlet.
+**Note:** `mute_length`, `mute_division`, `pitch_length`, `pitch_division`, `temperature`, and `chance` use the same message name in both directions. The JS knows direction by inlet vs outlet.
 
 ---
 
@@ -315,6 +329,28 @@ Max live.dial → [prepend temperature] → Inlet 2
     → setTemperatureValue(0.5)
     → broadcastToOSC('temperature')   → Outlet 1 → /looping/sequencer/state
                                                      (Svelte should APPLY — Max was the source)
+    → (NO outlet 0 — Max UI already shows correct value)
+```
+
+### OSC changes chance
+
+```
+Svelte → /looping/sequencer/chance [deviceId, 0.5]
+  → Inlet 1 → handleOSCCommand()
+    → setChanceValue(0.5)
+    → sendChanceState()               → Outlet 0 → Max UI dial updates
+    → broadcastState('chance')         → Outlet 1 → /looping/sequencer/state
+                                                      (Svelte should SKIP — it was the source)
+```
+
+### Max UI changes chance
+
+```
+Max live.dial → [prepend chance] → Inlet 2
+  → handleMaxUICommand('chance', [0.5])
+    → setChanceValue(0.5)
+    → broadcastToOSC('chance')         → Outlet 1 → /looping/sequencer/state
+                                                      (Svelte should APPLY — Max was the source)
     → (NO outlet 0 — Max UI already shows correct value)
 ```
 

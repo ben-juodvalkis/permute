@@ -20,6 +20,7 @@ var stateClasses = require('permute-state');
 var instruments = require('permute-instruments');
 var CommandRegistry = require('permute-commands').CommandRegistry;
 var temperature = require('permute-temperature');
+var chance = require('permute-chance');
 
 var OCTAVE_SEMITONES = constants.OCTAVE_SEMITONES;
 var DEFAULT_GAIN_VALUE = constants.DEFAULT_GAIN_VALUE;
@@ -79,6 +80,9 @@ function SequencerDevice() {
     // Maps clipId -> { originalPitches: { noteId: pitch } }
     this.temperatureState = {};
 
+    // Chance (note probability) state (non-sequenced)
+    this.chanceValue = 1.0; // Placeholder until UI re-emits on request_ui_values
+
     // Delta-based state tracking: clipId -> { pitch: 0/1, mute: 0/1 }
     this.lastValues = {};
 
@@ -99,10 +103,10 @@ function SequencerDevice() {
     this._clipCacheDirty = true;
 
     // Pre-allocated broadcast buffers (avoid per-tick array allocation)
-    // State: [trackIndex, mutePattern x8, muteLen, muteDiv x3, mutePos, pitchPattern x8, pitchLen, pitchDiv x3, pitchPos, temp] = 28
-    this._stateBuffer = new Array(28);
-    // Outlet args: [outletNum, "state_broadcast", trackIndex, origin, ...27 data values] = 31
-    this._outletBuffer = new Array(31);
+    // State: [trackIndex, mutePattern x8, muteLen, muteDiv x3, mutePos, pitchPattern x8, pitchLen, pitchDiv x3, pitchPos, temp, chance] = 29
+    this._stateBuffer = new Array(29);
+    // Outlet args: [outletNum, "state_broadcast", trackIndex, origin, ...28 data values] = 32
+    this._outletBuffer = new Array(32);
     this._outletBuffer[0] = 1;
     this._outletBuffer[1] = "state_broadcast";
 
@@ -199,11 +203,21 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
         self.broadcastState('temperature');
     });
 
+    // Chance command
+    this.commandRegistry.register('seq_chance', function(args) {
+        // args: [deviceId, value]
+        if (args.length < 2 || !isForThisDevice(args[0])) return;
+        var value = parseFloat(args[1]);
+        self.setChanceValue(value);
+        self.sendChanceState();
+        self.broadcastState('chance');
+    });
+
     // Complete state command (for ghost editing sync)
     this.commandRegistry.register('set_state', function(args) {
         // args: [deviceId, mutePattern[8], muteLength, muteBars, muteBeats, muteTicks,
-        //        pitchPattern[8], pitchLength, pitchBars, pitchBeats, pitchTicks, temperature]
-        // Total: 26 args (1 + 8 + 1 + 3 + 8 + 1 + 3 + 1)
+        //        pitchPattern[8], pitchLength, pitchBars, pitchBeats, pitchTicks, temperature, chance?]
+        // Total: 26-27 args (1 + 8 + 1 + 3 + 8 + 1 + 3 + 1 + optional 1)
         debug("set_state", "Received " + args.length + " args, deviceId=" + args[0]);
         if (args.length < 26) {
             debug("set_state", "REJECTED: not enough args");
@@ -250,6 +264,13 @@ SequencerDevice.prototype.setupCommandHandlers = function() {
         var temp = parseFloat(args[idx++]);
         self.setTemperatureValue(temp);
         self.sendTemperatureState();
+
+        // Chance (optional, for backward compatibility)
+        if (idx < args.length) {
+            var chanceVal = parseFloat(args[idx++]);
+            self.setChanceValue(chanceVal);
+            self.sendChanceState();
+        }
 
         // Send sequencer state to UI
         self.sendSequencerState('mute');
@@ -427,11 +448,12 @@ SequencerDevice.prototype.checkAndActivateObservers = function() {
     // init() calls this again after setup.
     if (!this.trackState.ref) return;
 
-    // Check if either sequencer is now active
+    // Check if any sequencer is active or chance needs transport stop
     var muteActive = this.sequencers.muteSequencer.isActive();
     var pitchActive = this.sequencers.pitchSequencer.isActive();
+    var chanceActive = this.chanceValue < 1.0;
 
-    if (muteActive || pitchActive) {
+    if (muteActive || pitchActive || chanceActive) {
         this.ensurePlaybackObservers();
     }
 };
@@ -458,6 +480,11 @@ SequencerDevice.prototype.onTransportStart = function() {
             }
         }
         this.setupTemperatureLoopJumpObserver();
+    }
+
+    // Apply chance to clip if active
+    if (this.chanceValue < 1.0) {
+        this.applyChanceToClip();
     }
 };
 
@@ -579,6 +606,9 @@ SequencerDevice.prototype.onTransportStop = function() {
     }
     // Broadcast reset positions to OSC
     this.broadcastState('position');
+
+    // Restore note probability to 1.0
+    this.restoreChance();
 
     // Clear temperature observer (will be re-setup on next transport start if temp > 0)
     this.clearTemperatureLoopJumpObserver();
@@ -792,6 +822,10 @@ SequencerDevice.prototype.executeBatchAudio = function(clip, clipId, pending) {
 // ===== TEMPERATURE MIXIN =====
 // Apply temperature methods to SequencerDevice.prototype from permute-temperature.js
 temperature.applyTemperatureMethods(SequencerDevice.prototype);
+
+// ===== CHANCE MIXIN =====
+// Apply chance methods to SequencerDevice.prototype from permute-chance.js
+chance.applyChanceMethods(SequencerDevice.prototype);
 
 // ===== INSTRUMENT DETECTION =====
 
@@ -1053,11 +1087,11 @@ SequencerDevice.prototype.sendTemperatureState = function() {
  * Build state data array for OSC broadcasts.
  * Returns the raw data (without message selector or origin).
  *
- * Format (27 values):
+ * Format (28 values):
  *   trackIndex,
  *   mutePattern[8], muteLength, muteBars, muteBeats, muteTicks, mutePosition,
  *   pitchPattern[8], pitchLength, pitchBars, pitchBeats, pitchTicks, pitchPosition,
- *   temperature
+ *   temperature, chance
  *
  * @returns {Array|null} - State data array, or null if not ready
  */
@@ -1102,6 +1136,9 @@ SequencerDevice.prototype.buildStateData = function() {
     // Temperature — index 27
     buf[27] = this.temperatureValue || 0.0;
 
+    // Chance — index 28
+    buf[28] = this.chanceValue;
+
     return buf;
 };
 
@@ -1109,10 +1146,10 @@ SequencerDevice.prototype.buildStateData = function() {
  * Broadcast state to OSC output (outlet 1).
  * Sends state_broadcast with origin tag for external listeners.
  *
- * Format (29 args):
+ * Format (30 args):
  *   state_broadcast, trackIndex, origin, mutePattern[8], muteLength,
  *   muteBars, muteBeats, muteTicks, mutePosition, pitchPattern[8],
- *   pitchLength, pitchBars, pitchBeats, pitchTicks, pitchPosition, temperature
+ *   pitchLength, pitchBars, pitchBeats, pitchTicks, pitchPosition, temperature, chance
  *
  * Origin values:
  *   'init'          - Device just initialized
@@ -1124,6 +1161,7 @@ SequencerDevice.prototype.buildStateData = function() {
  *   'mute_rate'     - Mute rate changed via OSC
  *   'pitch_rate'    - Pitch rate changed via OSC
  *   'temperature'   - Temperature changed via OSC
+ *   'chance'        - Chance changed via OSC
  *   'position'      - Playhead moved (during playback)
  *
  * @param {string} origin - Why this broadcast is happening
@@ -1133,11 +1171,11 @@ SequencerDevice.prototype.broadcastToOSC = function(origin, stateData) {
     var data = stateData || this.buildStateData();
     if (!data) return;
 
-    // Fill pre-allocated outlet buffer in-place: [1, "state_broadcast", trackIndex, origin, data[1]..data[27]]
+    // Fill pre-allocated outlet buffer in-place: [1, "state_broadcast", trackIndex, origin, data[1]..data[28]]
     var out = this._outletBuffer;
     out[2] = data[0]; // trackIndex
     out[3] = origin;
-    for (var i = 1; i < 28; i++) {
+    for (var i = 1; i < 29; i++) {
         out[3 + i] = data[i];
     }
     outlet.apply(null, out);
@@ -1194,6 +1232,8 @@ SequencerDevice.prototype.handleOSCCommand = function(address, args) {
         command = 'set_state';
     } else if (parts[0] === 'temperature') {
         command = 'seq_temperature';
+    } else if (parts[0] === 'chance') {
+        command = 'seq_chance';
     } else if (parts.length === 2) {
         // mute/step, mute/length, mute/rate, pitch/step, etc.
         command = 'seq_' + parts[0] + '_' + parts[1];
@@ -1273,6 +1313,15 @@ SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
         return;
     }
 
+    // Chance dial
+    if (messageName === 'chance') {
+        if (args.length >= 1) {
+            this.setChanceValue(parseFloat(args[0]));
+            this.broadcastToOSC('chance');
+        }
+        return;
+    }
+
     // Temperature reset button
     if (messageName === 'temperature_reset') {
         var clip = this.getCurrentClip();
@@ -1326,6 +1375,12 @@ SequencerDevice.prototype.onClipChanged = function() {
         }
     }
 
+    // Re-apply chance to new clip if chance is active
+    if (this.chanceValue < 1.0) {
+        this.applyChanceToClip();
+        debug("onClipChanged", "Re-applied chance to new clip");
+    }
+
     // lastValues are tracked per clipId, so no need to clear on clip change
 };
 
@@ -1337,9 +1392,10 @@ SequencerDevice.prototype.onClipChanged = function() {
  */
 SequencerDevice.prototype.getState = function() {
     var state = {
-        version: '3.1',
+        version: '3.2',
         deviceId: this.deviceId,
         temperature: this.temperatureValue || 0.0,
+        chance: this.chanceValue,
         sequencers: {}
     };
 
@@ -1382,6 +1438,11 @@ SequencerDevice.prototype.setState = function(state) {
     if (state.temperature !== undefined) {
         this.setTemperatureValue(state.temperature);
         this.sendTemperatureState();
+    }
+
+    if (state.chance !== undefined) {
+        this.setChanceValue(state.chance);
+        this.sendChanceState();
     }
 };
 

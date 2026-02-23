@@ -111,10 +111,10 @@ function applyTemperatureMethods(proto) {
         this.temperatureValue = newTemperatureValue;
         this.temperatureActive = willBeActive;
 
-        // Setup or clear loop jump observer
-        if (willBeActive) {
+        // Setup or clear loop jump observer only on actual transitions
+        if (!wasActive && willBeActive) {
             this.setupTemperatureLoopJumpObserver();
-        } else {
+        } else if (wasActive && !willBeActive) {
             this.clearTemperatureLoopJumpObserver();
         }
 
@@ -143,12 +143,6 @@ function applyTemperatureMethods(proto) {
             return;
         }
 
-        // Determine if pitch sequencer is currently shifting notes up
-        var pitchWasOn = false;
-        if (this.lastValues[clipId] && this.lastValues[clipId].pitch === 1) {
-            pitchWasOn = true;
-        }
-
         // Calculate offset to get TRUE base pitch (before pitch sequencer shift)
         // If pitch is on, notes are currently shifted +12, so subtract to get base
         var pitchOffset = -this._getCurrentPitchOffset(clipId);
@@ -163,12 +157,10 @@ function applyTemperatureMethods(proto) {
 
         // Store state
         this.temperatureState[clipId] = {
-            originalPitches: originalPitches,
-            capturedWithPitchOn: pitchWasOn
+            originalPitches: originalPitches
         };
 
         debug("captureTemperatureState", "Captured " + notes.notes.length + " notes for clip " + clipId, {
-            pitchWasOn: pitchWasOn,
             sampleNoteIds: Object.keys(originalPitches).slice(0, 3)
         });
     };

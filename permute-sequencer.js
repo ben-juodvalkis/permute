@@ -38,6 +38,9 @@ function Sequencer(name, valueType, patternLength) {
     // Mute defaults to 1 (unmuted), pitch defaults to 0 (no shift)
     this.defaultValue = this.valueType.default;
 
+    // Cached active state — recomputed on pattern/step/length changes
+    this._isActive = false;
+
     // Timing
     this.division = [1, 0, 0]; // Default 1 bar per step
     this.ticksPerStep = 1920;
@@ -67,6 +70,7 @@ Sequencer.prototype.setPattern = function(pattern) {
     }
     this.pattern = validated;
     this.patternLength = validated.length;
+    this._recomputeActive();
 
     if (this.device && this.device.checkAndActivateObservers) {
         this.device.checkAndActivateObservers();
@@ -82,6 +86,7 @@ Sequencer.prototype.setStep = function(index, value) {
     if (index >= 0 && index < this.pattern.length) {
         if (this.valueType.validate(value)) {
             this.pattern[index] = value;
+            this._recomputeActive();
 
             if (this.device && this.device.checkAndActivateObservers) {
                 this.device.checkAndActivateObservers();
@@ -110,6 +115,7 @@ Sequencer.prototype.setLength = function(length) {
     }
 
     this.patternLength = newLength;
+    this._recomputeActive();
 
     // Reset step if out of bounds
     if (this.currentStep >= newLength) {
@@ -149,19 +155,28 @@ Sequencer.prototype.getCurrentValue = function() {
 };
 
 /**
+ * Recompute cached active state.
+ * Called when pattern, step, or length changes.
+ */
+Sequencer.prototype._recomputeActive = function() {
+    for (var i = 0; i < this.patternLength; i++) {
+        if (this.pattern[i] !== this.defaultValue) {
+            this._isActive = true;
+            return;
+        }
+    }
+    this._isActive = false;
+};
+
+/**
  * Check if sequencer is active (has non-default pattern values).
- * Replaces explicit 'enabled' flag with pattern-derived state.
+ * Returns cached value — recomputed on pattern/step/length changes.
  * - Mute: active if any step is 0 (muted)
  * - Pitch: active if any step is 1 (shifted)
  * @returns {boolean} - True if sequencer has active pattern
  */
 Sequencer.prototype.isActive = function() {
-    for (var i = 0; i < this.patternLength; i++) {
-        if (this.pattern[i] !== this.defaultValue) {
-            return true;
-        }
-    }
-    return false;
+    return this._isActive;
 };
 
 module.exports = {

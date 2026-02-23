@@ -49,8 +49,7 @@ function generateSwapPattern(notes, temperature) {
     for (var i = 0; i < notes.length; i++) {
         sortedIndices.push({
             originalIndex: i,
-            startTime: notes[i].start_time,
-            pitch: notes[i].pitch
+            startTime: notes[i].start_time
         });
     }
 

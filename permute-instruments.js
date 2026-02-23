@@ -108,13 +108,11 @@ TransposeStrategy.prototype.applyTranspose = function(shouldShiftUp) {
             return;
         }
 
-        var currentTranspose = this.transposeParam.get("value");
-        var currentValue = currentTranspose ? currentTranspose[0] : DEFAULT_DRUM_RACK_TRANSPOSE;
-        debug("transpose", "currentValue from param: " + currentValue);
-
+        // Only read param value once to capture the original — avoids IPC on subsequent calls
         if (this.originalTranspose === null) {
-            this.originalTranspose = currentValue;
-            debug("transpose", "captured originalTranspose=" + currentValue);
+            var currentTranspose = this.transposeParam.get("value");
+            this.originalTranspose = currentTranspose ? currentTranspose[0] : DEFAULT_DRUM_RACK_TRANSPOSE;
+            debug("transpose", "captured originalTranspose=" + this.originalTranspose);
         }
 
         var newValue;

@@ -54,6 +54,7 @@ function SequencerDevice() {
     // Initialize mute pattern to all unmuted (1 = play, 0 = mute)
     this.sequencers.muteSequencer.pattern = [1, 1, 1, 1, 1, 1, 1, 1];
     this.sequencers.muteSequencer.defaultValue = 1; // Override: mute default is unmuted (1)
+    this.sequencers.muteSequencer._recomputeActive();
 
     // Set device reference on sequencers
     for (var name in this.sequencers) {
@@ -75,7 +76,7 @@ function SequencerDevice() {
     this.temperatureLoopJumpObserver = null;
 
     // Temperature note ID tracking for reversible transformations
-    // Maps clipId -> { originalPitches: { noteId: pitch }, capturedWithPitchOn: boolean }
+    // Maps clipId -> { originalPitches: { noteId: pitch } }
     this.temperatureState = {};
 
     // Delta-based state tracking: clipId -> { pitch: 0/1, mute: 0/1 }
@@ -91,6 +92,19 @@ function SequencerDevice() {
 
     // Observer registry
     this.observerRegistry = new ObserverRegistry();
+
+    // Clip cache: avoids redundant LiveAPI IPC on every tick
+    this._cachedClip = null;
+    this._cachedClipId = null;
+    this._clipCacheDirty = true;
+
+    // Pre-allocated broadcast buffers (avoid per-tick array allocation)
+    // State: [trackIndex, mutePattern x8, muteLen, muteDiv x3, mutePos, pitchPattern x8, pitchLen, pitchDiv x3, pitchPos, temp] = 28
+    this._stateBuffer = new Array(28);
+    // Outlet args: [outletNum, "state_broadcast", trackIndex, origin, ...27 data values] = 31
+    this._outletBuffer = new Array(31);
+    this._outletBuffer[0] = 1;
+    this._outletBuffer[1] = "state_broadcast";
 
     // Lazy observer activation: transport/time-sig observers created on first active sequencer
     this.playbackObserversActive = false;
@@ -430,6 +444,7 @@ SequencerDevice.prototype.checkAndActivateObservers = function() {
  */
 SequencerDevice.prototype.onTransportStart = function() {
     debug("transport", "Transport started");
+    this.invalidateClipCache();
     this.transportState.setPlaying(true);
 
     // If temperature was set before transport started, capture state now
@@ -453,6 +468,7 @@ SequencerDevice.prototype.onTransportStart = function() {
  */
 SequencerDevice.prototype.onTransportStop = function() {
     debug("transport", "Transport stopped");
+    this.invalidateClipCache();
 
     // Always revert parameter_transpose on stop, even without a clip
     if (this.instrumentType === 'parameter_transpose') {
@@ -472,6 +488,7 @@ SequencerDevice.prototype.onTransportStop = function() {
                 this.sendSequencerPosition(cleanName);
             }
         }
+        this.broadcastState('position');
         return;
     }
 
@@ -560,6 +577,8 @@ SequencerDevice.prototype.onTransportStop = function() {
             this.sendSequencerPosition(cleanName);
         }
     }
+    // Broadcast reset positions to OSC
+    this.broadcastState('position');
 
     // Clear temperature observer (will be re-setup on next transport start if temp > 0)
     this.clearTemperatureLoopJumpObserver();
@@ -832,11 +851,28 @@ SequencerDevice.prototype.detectInstrumentType = function() {
 // ===== CLIP MANAGEMENT =====
 
 /**
+ * Invalidate the clip cache.
+ * Called at the start of each tick, and on transport/clip change events.
+ */
+SequencerDevice.prototype.invalidateClipCache = function() {
+    this._clipCacheDirty = true;
+};
+
+/**
  * Get the currently playing clip on the track.
+ * Uses a per-tick cache to avoid redundant LiveAPI IPC calls.
  * Clears temperature observer when clip changes.
  * @returns {LiveAPI|null} - Live API clip object or null if no clip playing
  */
 SequencerDevice.prototype.getCurrentClip = function() {
+    // Return cached clip if cache is clean
+    if (!this._clipCacheDirty && this._cachedClip) {
+        return this._cachedClip;
+    }
+    if (!this._clipCacheDirty && this._cachedClip === null) {
+        return null;
+    }
+
     if (!this.trackState.ref) return null;
 
     try {
@@ -849,7 +885,12 @@ SequencerDevice.prototype.getCurrentClip = function() {
         }
 
         // Early exit if no slot found
-        if (!slotIndex || slotIndex[0] < 0) return null;
+        if (!slotIndex || slotIndex[0] < 0) {
+            this._cachedClip = null;
+            this._cachedClipId = null;
+            this._clipCacheDirty = false;
+            return null;
+        }
 
         var clipPath = this.trackState.ref.path + " clip_slots " + slotIndex[0] + " clip";
         var clip = new LiveAPI(clipPath);
@@ -859,11 +900,20 @@ SequencerDevice.prototype.getCurrentClip = function() {
                 this.clearTemperatureLoopJumpObserver();
                 this.clipState.update(clip.id);
             }
+            this._cachedClip = clip;
+            this._cachedClipId = clip.id;
+            this._clipCacheDirty = false;
             return clip;
         }
+
+        this._cachedClip = null;
+        this._cachedClipId = null;
+        this._clipCacheDirty = false;
         return null;
     } catch (error) {
         handleError("getCurrentClip", error, false);
+        this._cachedClip = null;
+        this._cachedClipId = null;
         return null;
     }
 };
@@ -882,9 +932,22 @@ SequencerDevice.prototype.processWithSongTime = function(ticks) {
     var lookaheadTicks = 120;
     var targetTicks = ticks + lookaheadTicks;
 
+    // Invalidate clip cache once per tick; first sequencer re-fetches, second reuses cache
+    this.invalidateClipCache();
+
+    // Snapshot positions before processing
+    var muteStep = this.sequencers.muteSequencer.currentStep;
+    var pitchStep = this.sequencers.pitchSequencer.currentStep;
+
     // Process both sequencers from single time source with lookahead
-    this.processSequencerTick('mute', targetTicks);
-    this.processSequencerTick('pitch', targetTicks);
+    this.processSequencerTick('mute', this.sequencers.muteSequencer, targetTicks);
+    this.processSequencerTick('pitch', this.sequencers.pitchSequencer, targetTicks);
+
+    // Single broadcast if either position changed
+    if (this.sequencers.muteSequencer.currentStep !== muteStep ||
+        this.sequencers.pitchSequencer.currentStep !== pitchStep) {
+        this.broadcastState('position');
+    }
 };
 
 /**
@@ -893,11 +956,10 @@ SequencerDevice.prototype.processWithSongTime = function(ticks) {
  * Pitch sequencer with parameter_transpose works without a playing clip.
  *
  * @param {string} seqName - Sequencer name ('mute', 'pitch')
+ * @param {Sequencer} seq - Sequencer instance
  * @param {number} ticks - Absolute tick position
  */
-SequencerDevice.prototype.processSequencerTick = function(seqName, ticks) {
-    var seq = this.sequencers[seqName + 'Sequencer'];
-
+SequencerDevice.prototype.processSequencerTick = function(seqName, seq, ticks) {
     if (!seq || !seq.isActive()) return;
 
     var newStep = seq.calculateStep(ticks);
@@ -961,8 +1023,8 @@ SequencerDevice.prototype.sendSequencerState = function(seqName) {
 };
 
 /**
- * Send only the current step position to Max UI (outlet 0) and OSC.
- * Called on every sequencer tick during playback — kept minimal for efficiency.
+ * Send only the current step position to Max UI (outlet 0).
+ * OSC broadcast is handled once per tick by processWithSongTime.
  *
  * @param {string} seqName - Sequencer name ('mute', 'pitch', etc.)
  */
@@ -971,7 +1033,6 @@ SequencerDevice.prototype.sendSequencerPosition = function(seqName) {
     if (!seq) return;
 
     outlet(0, seqName + "_current", seq.currentStep);
-    this.broadcastState('position');
 };
 
 /**
@@ -1006,48 +1067,36 @@ SequencerDevice.prototype.buildStateData = function() {
     // Skip if sequencers not initialized
     if (!muteSeq || !pitchSeq) return null;
 
-    var data = [trackIndex];
+    // Fill pre-allocated buffer in-place
+    var buf = this._stateBuffer;
+    buf[0] = trackIndex;
 
-    // Mute pattern (8 steps)
+    // Mute pattern (8 steps) — indices 1-8
     for (var i = 0; i < 8; i++) {
-        var value = (i < muteSeq.pattern.length) ? muteSeq.pattern[i] : muteSeq.valueType.default;
-        data.push(value);
+        buf[1 + i] = (i < muteSeq.pattern.length) ? muteSeq.pattern[i] : muteSeq.valueType.default;
     }
 
-    // Mute length
-    data.push(muteSeq.patternLength);
+    // Mute length, division, position — indices 9-13
+    buf[9] = muteSeq.patternLength;
+    var md = muteSeq.division;
+    buf[10] = md[0]; buf[11] = md[1]; buf[12] = md[2];
+    buf[13] = muteSeq.currentStep;
 
-    // Mute rate as division (bars, beats, ticks)
-    var muteDivision = muteSeq.division || [1, 0, 0];
-    data.push(muteDivision[0] || 0);
-    data.push(muteDivision[1] || 0);
-    data.push(muteDivision[2] || 0);
-
-    // Mute position
-    data.push(muteSeq.currentStep);
-
-    // Pitch pattern (8 steps)
+    // Pitch pattern (8 steps) — indices 14-21
     for (var i = 0; i < 8; i++) {
-        var value = (i < pitchSeq.pattern.length) ? pitchSeq.pattern[i] : pitchSeq.valueType.default;
-        data.push(value);
+        buf[14 + i] = (i < pitchSeq.pattern.length) ? pitchSeq.pattern[i] : pitchSeq.valueType.default;
     }
 
-    // Pitch length
-    data.push(pitchSeq.patternLength);
+    // Pitch length, division, position — indices 22-26
+    buf[22] = pitchSeq.patternLength;
+    var pd = pitchSeq.division;
+    buf[23] = pd[0]; buf[24] = pd[1]; buf[25] = pd[2];
+    buf[26] = pitchSeq.currentStep;
 
-    // Pitch rate as division (bars, beats, ticks)
-    var pitchDivision = pitchSeq.division || [1, 0, 0];
-    data.push(pitchDivision[0] || 0);
-    data.push(pitchDivision[1] || 0);
-    data.push(pitchDivision[2] || 0);
+    // Temperature — index 27
+    buf[27] = this.temperatureValue || 0.0;
 
-    // Pitch position
-    data.push(pitchSeq.currentStep);
-
-    // Temperature
-    data.push(this.temperatureValue || 0.0);
-
-    return data;
+    return buf;
 };
 
 /**
@@ -1078,9 +1127,14 @@ SequencerDevice.prototype.broadcastToOSC = function(origin, stateData) {
     var data = stateData || this.buildStateData();
     if (!data) return;
 
-    // Insert origin after trackIndex: [state_broadcast, trackIndex, origin, ...data]
-    var args = ["state_broadcast", data[0], origin].concat(data.slice(1));
-    outlet.apply(null, [1].concat(args));
+    // Fill pre-allocated outlet buffer in-place: [1, "state_broadcast", trackIndex, origin, data[1]..data[27]]
+    var out = this._outletBuffer;
+    out[2] = data[0]; // trackIndex
+    out[3] = origin;
+    for (var i = 1; i < 28; i++) {
+        out[3 + i] = data[i];
+    }
+    outlet.apply(null, out);
 };
 
 /**
@@ -1244,7 +1298,15 @@ SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
  * Cleans up temperature state for old clip, re-captures for new clip if active.
  */
 SequencerDevice.prototype.onClipChanged = function() {
-    if (Object.keys(this.temperatureState).length > 0) {
+    this.invalidateClipCache();
+    var hasTemperatureState = false;
+    for (var k in this.temperatureState) {
+        if (this.temperatureState.hasOwnProperty(k)) {
+            hasTemperatureState = true;
+            break;
+        }
+    }
+    if (hasTemperatureState) {
         this.temperatureState = {};
         debug("onClipChanged", "Cleared temperature state for old clip");
     }

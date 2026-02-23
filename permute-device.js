@@ -873,7 +873,12 @@ SequencerDevice.prototype.getCurrentClip = function() {
         return null;
     }
 
-    if (!this.trackState.ref) return null;
+    if (!this.trackState.ref) {
+        this._cachedClip = null;
+        this._cachedClipId = null;
+        this._clipCacheDirty = false;
+        return null;
+    }
 
     try {
         // Try playing_slot_index first
@@ -914,6 +919,7 @@ SequencerDevice.prototype.getCurrentClip = function() {
         handleError("getCurrentClip", error, false);
         this._cachedClip = null;
         this._cachedClipId = null;
+        this._clipCacheDirty = false;
         return null;
     }
 };

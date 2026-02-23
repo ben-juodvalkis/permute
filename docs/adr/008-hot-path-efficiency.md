@@ -40,7 +40,7 @@ Optimize the hot path through caching, deduplication, pre-allocation, and dead c
 - **Impact:** Halves broadcast calls during normal playback
 
 ### Pre-allocated Broadcast Buffers (`permute-device.js`)
-- Added `_stateBuffer` (28 elements) and `_outletBuffer` (30 elements) to constructor
+- Added `_stateBuffer` (28 elements) and `_outletBuffer` (31 elements) to constructor
 - `buildStateData()` fills `_stateBuffer` in-place via indexed writes (no `push()`)
 - `broadcastToOSC()` fills `_outletBuffer` in-place (no `slice()`/`concat()`)
 - **Impact:** Eliminates ~6 array allocations per broadcast

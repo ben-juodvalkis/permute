@@ -16,10 +16,10 @@ Add a `chanceValue` property (default 1.0) to SequencerDevice, implemented as a 
 ### Key behaviors
 
 - Setting chance applies `note.probability` to all notes in the current clip immediately
-- Transport stop restores probability to 1.0
+- Chance persists across transport start/stop — notes always reflect the slider value
 - Clip change re-applies the current chance value to the new clip
-- Transport start applies chance if already set before playback
-- Chance < 1.0 activates playback observers (improvement over temperature's approach)
+- Transport start re-applies chance (in case notes changed while stopped)
+- Chance < 1.0 activates playback observers (needed for clip-change re-application)
 - MIDI-only (audio clips have no notes)
 
 ### Why no capture/restore complexity
@@ -33,7 +33,6 @@ Temperature needs note ID tracking for reversible pitch shuffling — each note'
 Mixin with `applyChanceMethods(proto)`:
 - `setChanceValue(value)` — clamp, skip if unchanged, apply to clip, activate observers
 - `applyChanceToClip()` — set `note.probability` on all notes via Live API
-- `restoreChance()` — set probability back to 1.0
 - `sendChanceState()` — outlet 0 feedback to Max UI
 
 ### Modified: `permute-device.js`
@@ -43,8 +42,7 @@ Mixin with `applyChanceMethods(proto)`:
 - `seq_chance` command handler for OSC
 - Chance in `set_state` parsing (optional arg for backward compat)
 - `checkAndActivateObservers()` includes `chanceValue < 1.0`
-- `onTransportStop()` calls `restoreChance()`
-- `onTransportStart()` applies chance if active
+- `onTransportStart()` re-applies chance if active
 - `onClipChanged()` re-applies chance to new clip
 - `buildStateData()` includes chance at buffer index 28
 - Broadcast buffers expanded: `_stateBuffer` 28→29, `_outletBuffer` 31→32
@@ -75,7 +73,7 @@ Mixin with `applyChanceMethods(proto)`:
 
 ### Neutral
 - State version bumped to 3.2
-- Chance < 1.0 activates playback observers even without sequencer patterns (intentional — ensures transport stop restores probability)
+- Chance < 1.0 activates playback observers even without sequencer patterns (intentional — needed for clip-change re-application)
 
 ## Related
 - GitHub Issue #8

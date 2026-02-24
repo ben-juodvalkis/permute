@@ -448,7 +448,7 @@ SequencerDevice.prototype.checkAndActivateObservers = function() {
     // init() calls this again after setup.
     if (!this.trackState.ref) return;
 
-    // Check if any sequencer is active or chance needs transport stop
+    // Check if any sequencer is active or chance needs clip-change re-application
     var muteActive = this.sequencers.muteSequencer.isActive();
     var pitchActive = this.sequencers.pitchSequencer.isActive();
     var chanceActive = this.chanceValue < 1.0;
@@ -607,8 +607,6 @@ SequencerDevice.prototype.onTransportStop = function() {
     // Broadcast reset positions to OSC
     this.broadcastState('position');
 
-    // Restore note probability to 1.0
-    this.restoreChance();
 
     // Clear temperature observer (will be re-setup on next transport start if temp > 0)
     this.clearTemperatureLoopJumpObserver();

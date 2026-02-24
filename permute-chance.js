@@ -35,7 +35,7 @@ function applyChanceMethods(proto) {
         this.chanceValue = newValue;
 
         // Activate playback observers if chance becomes non-default.
-        // Needed so onTransportStop can restore probability to 1.0.
+        // Needed so onClipChanged can re-apply chance to new clips.
         if (newValue < 1.0) {
             this.checkAndActivateObservers();
         }
@@ -69,33 +69,6 @@ function applyChanceMethods(proto) {
             debug("chance", "Applied probability " + this.chanceValue + " to " + notes.notes.length + " notes");
         } catch (error) {
             handleError("applyChanceToClip", error, false);
-        }
-    };
-
-    /**
-     * Restore note probability to 1.0 (always play) for the current clip.
-     * Called on transport stop to undo chance modifications.
-     */
-    proto.restoreChance = function() {
-        if (this.trackState.type !== 'midi') return;
-        if (this.chanceValue >= 1.0) return; // Nothing to restore
-
-        var clip = this.getCurrentClip();
-        if (!clip) return;
-
-        try {
-            var notesJson = clip.call("get_all_notes_extended");
-            var notes = parseNotesResponse(notesJson);
-            if (!notes || !notes.notes || notes.notes.length === 0) return;
-
-            for (var i = 0; i < notes.notes.length; i++) {
-                notes.notes[i].probability = 1.0;
-            }
-
-            clip.call("apply_note_modifications", notes);
-            debug("chance", "Restored probability to 1.0 for " + notes.notes.length + " notes");
-        } catch (error) {
-            handleError("restoreChance", error, false);
         }
     };
 

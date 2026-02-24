@@ -463,6 +463,7 @@ SequencerDevice.prototype.checkAndActivateObservers = function() {
 /**
  * Handle transport start.
  * Captures temperature state if temperature was set before playback.
+ * Re-applies chance to clip (in case notes were added while stopped).
  */
 SequencerDevice.prototype.onTransportStart = function() {
     debug("transport", "Transport started");
@@ -1393,7 +1394,7 @@ SequencerDevice.prototype.getState = function() {
         version: '3.2',
         deviceId: this.deviceId,
         temperature: this.temperatureValue || 0.0,
-        chance: this.chanceValue,
+        chance: this.chanceValue ?? 1.0,
         sequencers: {}
     };
 

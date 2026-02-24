@@ -1,97 +1,294 @@
-# Plan: Add Note Chance (Probability) to Permute
+# Note Chance: Implementation Status & Migration Guide
 
-**Issue:** #8 — Migrate note chance/probability from Looping to Permute
+## Part 1: Permute Side — DONE
 
-## Context
+See `docs/adr/009-note-chance-probability.md` for the full architecture decision record.
 
-Permute has mute sequencing, pitch sequencing, and temperature-based note shuffling. We need to add a "chance" parameter that sets `note.probability` (0.0–1.0) on all notes in the current clip. This is a simple value like temperature, not a step-sequenced pattern. Default is 1.0 (always play).
+### What was added
 
-Key architectural rules from ADRs:
+| File | Change |
+|------|--------|
+| `permute-chance.js` | New mixin: `setChanceValue()`, `applyChanceToClip()`, `sendChanceState()` |
+| `permute-device.js` | 15 integration points: import, constructor, buffers, command handlers, transport hooks, broadcast, UI routing, state persistence |
+| `docs/api.md` | New OSC command, broadcast format (30 args), origin values, Max UI messages, data flow examples |
+| `docs/adr/009-note-chance-probability.md` | Architecture decision record |
+| `CLAUDE.md` | Updated key files, broadcast arg count, architecture sections |
 
-- **ADR-006:** UI elements with `parameter_enable: 1` are the sole persistence/source of truth. JS has no defaults — it receives initial state from UI on load via `request_ui_values`.
-- **ADR-008:** Pre-allocated broadcast buffers filled in-place.
-- **ADR-004:** Mixin pattern for coupled features; flat CommonJS modules.
+### Permute API summary
 
-## Files to Create/Modify
+| Direction | Address | Args |
+|-----------|---------|------|
+| OSC in | `/looping/sequencer/chance` | `[deviceId, value]` (0.0–1.0) |
+| Max UI in | `chance` (inlet 2) | `<value>` (0.0–1.0) |
+| Max UI out | `chance` (outlet 0) | `<value>` (0.0–1.0) |
+| Broadcast | `state_broadcast` index 29 | Float 0.0–1.0 |
+| set/state | arg index 26 (optional) | Float 0.0–1.0 |
 
-### 1. NEW: `permute-chance.js` — Chance mixin
+### Still needed in Permute
 
-Follow the `permute-temperature.js` mixin pattern. Export `applyChanceMethods(proto)` with:
+The Max patch (`Permute.maxpat`) needs a `live.dial` for the chance control:
+- Wired to inlet 2 with `[prepend chance]`
+- Receives outlet 0 `chance` messages for OSC-driven updates
+- Needs `parameter_enable: 1` for persistence (ADR-006 source of truth)
+- Best edited in Max's visual editor, not by hand
 
-- **`setChanceValue(value)`** — Clamp 0.0–1.0, skip if unchanged, apply to clip, activate playback observers if < 1.0
-- **`applyChanceToClip()`** — Guard on `trackState.type === 'midi'`, get clip, read notes via `get_all_notes_extended`, set `note.probability` on all notes, call `apply_note_modifications`
-- **`restoreChance()`** — If `chanceValue < 1.0`, set all notes' probability back to 1.0 (called on transport stop)
-- **`sendChanceState()`** — `outlet(0, "chance", this.chanceValue)`
+---
 
-Dependencies: `permute-utils` only.
+## Part 2: Looping Side — Migration Guide
 
-### 2. MODIFY: `permute-device.js` — 15 change points
+### The old path (what exists now)
 
-| # | Location | Change |
-|---|----------|--------|
-| a | Import (after line 22) | `var chance = require('permute-chance');` |
-| b | Constructor (after line 80) | Add `this.chanceValue = 1.0;` |
-| c | Constructor buffers (lines 101–107) | Grow `_stateBuffer` from 28→29, `_outletBuffer` from 31→32 |
-| d | `setupCommandHandlers()` (after line 200) | Register `seq_chance` command handler — parse float, call `setChanceValue`, `sendChanceState`, `broadcastState('chance')` |
-| e | `set_state` handler (lines 203–259) | Add optional chance arg at end (backward compatible — only parse if `idx < args.length`) |
-| f | `checkAndActivateObservers()` (line 434) | Add `this.chanceValue < 1.0` to the activation condition |
-| g | `onTransportStart()` (after line 461) | Call `applyChanceToClip()` if `chanceValue < 1.0` |
-| h | `onTransportStop()` (after line 584) | Call `this.restoreChance()` |
-| i | Apply mixin (after line 794) | `chance.applyChanceMethods(SequencerDevice.prototype);` |
-| j | `buildStateData()` (after line 1103) | Add `buf[28] = this.chanceValue;` |
-| k | `broadcastToOSC()` (line 1140) | Change loop bound from 28 to 29 |
-| l | `handleOSCCommand()` (after line 1196) | Add `else if (parts[0] === 'chance') { command = 'seq_chance'; }` |
-| m | `handleMaxUICommand()` (after line 1274) | Add chance message handler — parse float, call `setChanceValue`, `broadcastToOSC('chance')` |
-| n | `onClipChanged()` (after line 1328) | Re-apply chance if `chanceValue < 1.0` |
-| o | `getState()`/`setState()` | Include chance in state object, restore on `setState`; bump version to `'3.2'` |
+```
+ClipCentralView.svelte
+  noteChance (local $state(100), resets on mount)
+  handleNoteChanceChange(value)
+    → send('/cmd/set_clip_note_chance', [track, scene, percentage])
+      → bridge messageRouter.js routes to 'maxObserver'
+        → liveAPI-v6.js handleSetClipNoteChance()
+          → get_all_notes_extended → set probability → apply_note_modifications
+```
 
-### 3. MODIFY: `docs/api.md`
+**Problems:**
+- `noteChance` is component-local — resets to 100 on every mount
+- No persistence across track switches
+- No incoming broadcast handling (fire-and-forget)
+- Not in sequencerStore — no ghost editing, no cache, no echo filtering
+- Uses percentage (0–100) while everything else uses 0.0–1.0
 
-- Add `/looping/sequencer/chance [deviceId, value]` under OSC Input Commands
-- Update state broadcast format: 29→30 args, add index 29 = chance
-- Update set/state: 26→27 args, add index 26 = chance
-- Add `chance` to Max UI inlet 2 and outlet 0 message tables
-- Add `chance` to origin values table
-- Add data flow examples for OSC/Max UI chance changes
+### Files touching the old path
 
-### 4. NEW: `docs/adr/009-note-chance-probability.md`
+| File | What | Lines |
+|------|------|-------|
+| `interface/src/lib/components/v6/central/views/ClipCentralView.svelte` | `noteChance` state, `handleNoteChanceChange()`, CHANCE slider | 81, 181–199, 614–620 |
+| `interface/src/lib/services/clipOperations.ts` | Comment noting removal | 507 |
+| `interface/bridge/routing/messageRouter.js` | Route `/cmd/set_clip_note_chance` → maxObserver | 114 |
+| `ableton/scripts/liveAPI-v6.js` | `handleSetClipNoteChance()`, routing in `anything()` and `list()` | 3370–3376, 3554–3560, 4935–5029 |
 
-Document the feature addition, key design decisions (mixin pattern, no capture/restore needed, observer activation for chance, MIDI-only), and how it follows ADR-006 (UI source of truth).
+---
 
-### 5. MODIFY: `CLAUDE.md`
+### File 1: `maxObserverHandler.ts` — Parse chance from broadcast
 
-- Add `permute-chance.js` to Key Files table
-- Update state broadcast arg count reference (29→30)
+**File:** `interface/src/lib/api/handlers/maxObserverHandler.ts`
 
-## Key Design Decisions
+The broadcast parser at line 323 reads args 0–28. Add chance at index 29.
 
-- **UI source of truth (ADR-006):** The chance dial in the Max patch needs `parameter_enable: 1`. JS constructor sets 1.0 as a safe placeholder, but the real initial value comes from the UI re-emitting on `request_ui_values`.
+**Line 326** — update log message:
+```typescript
+logger.debug('Sequencer state broadcast (30-arg)', { trackIndex, origin });
+```
 
-- **Observer activation:** Unlike temperature (which relies on sequencers being active), chance < 1.0 activates playback observers directly. This ensures `onTransportStop` fires to restore probability to 1.0 even when no sequencer pattern is active.
+**After line 359** (after `const temperature = toNumber(args[28]);`):
+```typescript
+// Chance (arg 29) — backward compatible, defaults to 1.0 if absent
+const chance = args.length >= 30 ? toNumber(args[29]) : 1.0;
+```
 
-- **No capture/restore complexity:** Temperature needs note ID tracking for reversible pitch shuffling. Chance just sets a single probability value — restoring means setting back to 1.0. No note ID maps needed.
+**Line 385** — add to event detail state object:
+```typescript
+                temperature,
+                chance
+```
 
-- **MIDI-only:** Audio clips have no notes. `applyChanceToClip()` guards with `trackState.type === 'midi'`.
+---
 
-- **Backward compatible:** `set_state` parses chance only if extra arg exists. Older clients sending 26 args still work. State broadcast adds arg 29 — older listeners ignore it.
+### File 2: `sequencerStore.svelte.ts` — Add chance state and handlers
 
-## Verification
+**File:** `interface/src/lib/stores/v6/sequencerStore.svelte.ts`
 
-Since this is a Max4Live device with no automated tests:
+Follow the temperature pattern exactly. Every touchpoint:
 
-1. Save all changed files
-2. Delete and re-add `Permute.amxd` to reload (module files changed)
-3. Check Max console for errors/debug output
-4. **Test matrix:**
-   - Set chance to 0.5 → play clip → notes play ~50% of time
-   - Set chance to 0.0 → no notes play
-   - Set chance to 1.0 → all notes play
-   - Stop transport → verify probability restored to 1.0 (check with MIDI note inspector)
-   - Change clips while chance < 1.0 → new clip gets chance applied
-   - Save and reload Live Set → chance value persists via UI element
-   - OSC: send `/looping/sequencer/chance [deviceId, 0.5]` → verify Max UI updates
-   - State broadcast → verify chance appears at index 29
+#### a. State variable (after line 98)
+```typescript
+let temperature = $state(0.0);
+let chance = $state(1.0);
+```
 
-## Note: Max Patch Changes
+#### b. Sender function (after `sendTemperature` at line 182)
+```typescript
+function sendChance(value: number) {
+  if (!device) return;
+  const args = [device.id, value];
+  logger.info('SEQ TX: chance', { args });
+  markSent('chance');
+  send('/looping/sequencer/chance', args);
+}
+```
 
-The Max patch (`Permute.maxpat`) will need a `live.dial` (or similar) for the chance control, wired to inlet 2 with `[prepend chance]` and receiving outlet 0 `chance` messages for OSC-driven updates. The dial needs `parameter_enable: 1` for persistence. This is a JSON file that's best edited in Max's visual editor, not by hand.
+#### c. `sendCompleteState()` — add chance to payload (line 199)
+```typescript
+    temperature,
+    chance
+  ]);
+```
+
+#### d. `SequencerBroadcastState` interface (after line 220)
+```typescript
+  temperature: number;
+  chance: number;
+}
+```
+
+#### e. `applyFullState()` (after line 247)
+```typescript
+  temperature = state.temperature;
+  chance = state.chance ?? 1.0;
+```
+
+#### f. `resetToDefaults()` (after line 266)
+```typescript
+  temperature = 0.0;
+  chance = 1.0;
+```
+
+#### g. Active handler (after `handleTemperatureChange` at line 478)
+```typescript
+function handleChanceChange(value: number) {
+  if (!device) return;
+  chance = value;
+  sendChance(value);
+}
+```
+
+#### h. Ghost handler (after `handleTemperatureChangeGhost` at line 527)
+```typescript
+function handleChanceChangeGhost(value: number) {
+  chance = value;
+  triggerLoad();
+}
+```
+
+#### i. Store export — getter (after line 609)
+```typescript
+  get temperature() { return temperature; },
+  get chance() { return chance; },
+```
+
+#### j. Store export — methods (after line 630 and 639)
+```typescript
+  handleTemperatureChange,
+  handleChanceChange,
+  // ...
+  handleTemperatureChangeGhost,
+  handleChanceChangeGhost,
+```
+
+---
+
+### File 3: `ClipCentralView.svelte` — Route through store
+
+**File:** `interface/src/lib/components/v6/central/views/ClipCentralView.svelte`
+
+#### a. Add derived chance from store
+After `let temperature = $derived(sequencerStore.temperature);` (~line 91):
+```typescript
+let chance = $derived(sequencerStore.chance);
+```
+
+#### b. Delete old local state and handler
+**Delete line 81:**
+```typescript
+let noteChance = $state(100);
+```
+
+**Delete lines 181–199:**
+```typescript
+function handleNoteChanceChange(value: number) { ... }
+```
+
+#### c. Update the CHANCE slider template (lines 614–620)
+
+**Before:**
+```svelte
+<DeviceSlider
+    value={noteChance / 100}
+    title="CHANCE"
+    color={{ primary: 'rgb(59, 130, 246)', secondary: 'rgba(59, 130, 246, 0.1)', accent: 'rgb(96, 165, 250)' }}
+    orientation="horizontal"
+    onInteraction={(val) => handleNoteChanceChange(val * 100)}
+/>
+```
+
+**After:**
+```svelte
+<DeviceSlider
+    value={chance}
+    title="CHANCE"
+    color={{ primary: 'rgb(59, 130, 246)', secondary: 'rgba(59, 130, 246, 0.1)', accent: 'rgb(96, 165, 250)' }}
+    orientation="horizontal"
+    onInteraction={(val) => device
+        ? sequencerStore.handleChanceChange(val)
+        : sequencerStore.handleChanceChangeGhost(val)
+    }
+/>
+```
+
+Value is now 0.0–1.0 directly — no more `/ 100` or `* 100` conversion.
+
+---
+
+### File 4: `messageRouter.js` — Keep old route as fallback
+
+**File:** `interface/bridge/routing/messageRouter.js`, line 114
+
+Keep the old route. It remains a fallback for edge cases:
+```javascript
+// Legacy: direct clip note chance (for tracks without Permute)
+if (address === '/cmd/set_clip_note_chance') return 'maxObserver';
+```
+
+The new `/looping/sequencer/chance` address is already handled by the existing `/looping/sequencer/` routing — no new route needed.
+
+---
+
+### File 5: `liveAPI-v6.js` — Keep as fallback, add deprecation note
+
+**File:** `ableton/scripts/liveAPI-v6.js`, line 4935
+
+Keep `handleSetClipNoteChance()` intact. Add a deprecation comment:
+```javascript
+// DEPRECATED: Prefer /looping/sequencer/chance via Permute device.
+// Kept as fallback for tracks without Permute loaded.
+function handleSetClipNoteChance(trackIndex, sceneIndex, chancePercentage) {
+```
+
+---
+
+### What NOT to change
+
+`VariationControl.svelte` has a "chance" parameter at device index 1 — this is an **unrelated feature** (audio effect variation control). Do not touch it.
+
+---
+
+## Value Range Reference
+
+| Context | Range | Conversion? |
+|---------|-------|-------------|
+| Permute JS (`chanceValue`) | 0.0–1.0 | None |
+| Permute OSC | 0.0–1.0 | None |
+| Permute broadcast (index 29) | 0.0–1.0 | None |
+| Live API (`note.probability`) | 0.0–1.0 | None |
+| sequencerStore (`chance`) | 0.0–1.0 | None |
+| DeviceSlider | 0.0–1.0 | None |
+| **Old path** (`/cmd/set_clip_note_chance`) | **0–100 (%)** | **Converted in liveAPI-v6.js** |
+
+The migration eliminates the percentage conversion — everything is 0.0–1.0 end-to-end.
+
+---
+
+## Testing Checklist
+
+### New path (through Permute)
+- [ ] Adjust CHANCE slider on track WITH Permute → notes play probabilistically
+- [ ] Switch tracks → chance value persists (sequencerStore cache)
+- [ ] Switch back → cached value restored from broadcast
+- [ ] Ghost edit: adjust CHANCE on track WITHOUT Permute → device loads → chance applied
+- [ ] Stop transport → probability stays at slider value
+- [ ] Echo filtering → dragging slider doesn't cause jitter
+
+### Backward compatibility
+- [ ] Old `/cmd/set_clip_note_chance` route still works in liveAPI-v6.js
+
+### Edge cases
+- [ ] Chance = 0.0 → no notes play
+- [ ] Chance = 1.0 → all notes play (default)
+- [ ] Save/reload Live Set → chance persists via Permute UI element

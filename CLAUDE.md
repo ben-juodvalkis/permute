@@ -20,6 +20,7 @@ Permute is a Max4Live device that provides mute sequencing, pitch sequencing, an
 | `permute-commands.js` | CommandRegistry (message dispatch) |
 | `permute-shuffle.js` | Fisher-Yates shuffle, swap pattern generation |
 | `permute-temperature.js` | Temperature mixin (applied to SequencerDevice prototype) |
+| `permute-chance.js` | Chance/note probability mixin (applied to SequencerDevice prototype) |
 | `Permute.amxd` | Max4Live device file (load this in Ableton) |
 | `Permute.maxpat` | Max patch (UI and routing) |
 | `docs/api.md` | **Complete communication reference** — messaging, data flows, echo filtering |
@@ -35,9 +36,9 @@ See `docs/api.md` for the complete reference. Summary:
 |------|---------|----------|
 | Inlet 0 | Transport | `song_time <ticks>` |
 | Inlet 1 | OSC commands | `/looping/sequencer/*` |
-| Inlet 2 | Max UI values | `mute_steps`, `mute_length`, `mute_division`, `temperature`, etc. |
-| Outlet 0 | UI feedback | `mute_step_0`..`7`, `mute_current`, `mute_length`, `mute_division`, `temperature`, `request_ui_values` |
-| Outlet 1 | OSC broadcast | `state_broadcast` (29-arg flat format) |
+| Inlet 2 | Max UI values | `mute_steps`, `mute_length`, `mute_division`, `temperature`, `chance`, etc. |
+| Outlet 0 | UI feedback | `mute_step_0`..`7`, `mute_current`, `mute_length`, `mute_division`, `temperature`, `chance`, `request_ui_values` |
+| Outlet 1 | OSC broadcast | `state_broadcast` (30-arg flat format) |
 
 ### Data Flow Rules
 
@@ -74,7 +75,7 @@ Tracks `lastValues` per clip, applies deltas only on change:
 
 ### Lazy Observer Activation (v6.0)
 
-Transport and time signature observers are only created when a sequencer becomes active (pattern has non-default values). Reduces CPU overhead for idle devices.
+Transport and time signature observers are only created when a sequencer becomes active (pattern has non-default values) or chance < 1.0. Reduces CPU overhead for idle devices.
 
 ### Temperature Transformation (v3.1)
 
@@ -82,6 +83,14 @@ Uses note ID tracking for reversible pitch swapping:
 - Captures original pitches by `note_id` when temp goes 0→>0
 - Restores original pitches when temp goes >0→0
 - Handles overdubbing (new notes preserved) and deletion gracefully
+
+### Note Chance (v3.2)
+
+Sets `note.probability` on all notes in the current clip (MIDI only):
+- Value 0.0–1.0 (0=never, 1=always play)
+- Applied immediately on value change, on clip change, and on transport start
+- Restored to 1.0 on transport stop
+- Activates playback observers when < 1.0 (ensures transport stop fires)
 
 ## Common Development Tasks
 

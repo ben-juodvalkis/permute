@@ -583,7 +583,7 @@ SequencerDevice.prototype.onTransportStop = function() {
                         clip.set("pitch_coarse", 0);
                     }
                     if (this.lastValues[clipId].mute === 0) {
-                        clip.set("gain", DEFAULT_GAIN_VALUE);
+                        clip.set("gain", this.lastValues[clipId].originalGain || DEFAULT_GAIN_VALUE);
                     }
                 }
             }

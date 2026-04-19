@@ -20,7 +20,7 @@
 					"numoutlets" : 1,
 					"outlettype" : [ "" ],
 					"patching_rect" : [ 277.0, 482.0, 143.0, 22.0 ],
-					"text" : "read sequencer-device.js"
+					"text" : "read permute-device.js"
 				}
 
 			}
@@ -39,7 +39,7 @@
 			}
 , 			{
 				"box" : 				{
-					"filename" : "sequencer-device.js",
+					"filename" : "permute-device.js",
 					"id" : "obj-37",
 					"maxclass" : "newobj",
 					"numinlets" : 1,
@@ -50,9 +50,9 @@
 						"parameter_enable" : 0
 					}
 ,
-					"text" : "v8 sequencer-device.js",
+					"text" : "v8 permute-device.js",
 					"textfile" : 					{
-						"filename" : "sequencer-device.js",
+						"filename" : "permute-device.js",
 						"flags" : 0,
 						"embed" : 0,
 						"autowatch" : 1
@@ -677,8 +677,7 @@
 		}
 ,
 		"dependency_cache" : [ 			{
-				"name" : "sequencer-device.js",
-				"bootpath" : "/Users/Shared/DevWork/GitHub/Looping/ableton/M4L devices",
+				"name" : "permute-device.js",
 				"patcherrelativepath" : ".",
 				"type" : "TEXT",
 				"implicit" : 1

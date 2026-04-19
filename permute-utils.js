@@ -5,8 +5,6 @@
  */
 
 var constants = require('permute-constants');
-var TICKS_PER_QUARTER_NOTE = constants.TICKS_PER_QUARTER_NOTE;
-var DEFAULT_TIME_SIGNATURE = constants.DEFAULT_TIME_SIGNATURE;
 var INVALID_LIVE_API_ID = constants.INVALID_LIVE_API_ID;
 var TASK_SCHEDULE_DELAY = constants.TASK_SCHEDULE_DELAY;
 
@@ -215,25 +213,6 @@ function defer(callback) {
 }
 
 /**
- * Calculate ticks per step from [bars, beats, ticks] division and time signature.
- * @param {Array} division - Division as [bars, beats, ticks]
- * @param {number} timeSignature - Time signature numerator
- * @returns {number} - Ticks per step
- */
-function calculateTicksPerStep(division, timeSignature) {
-    if (Array.isArray(division) && division.length === 3) {
-        var bars = division[0];
-        var beats = division[1];
-        var ticks = division[2];
-        var beatsPerBar = timeSignature || DEFAULT_TIME_SIGNATURE;
-        return (bars * beatsPerBar * TICKS_PER_QUARTER_NOTE) +
-               (beats * TICKS_PER_QUARTER_NOTE) +
-               ticks;
-    }
-    return TICKS_PER_QUARTER_NOTE / 4; // Default to 16th notes
-}
-
-/**
  * Set DEBUG_MODE at runtime.
  * @param {boolean} enabled
  */
@@ -249,6 +228,5 @@ module.exports = {
     isParameterTransposeDevice: isParameterTransposeDevice,
     createObserver: createObserver,
     defer: defer,
-    calculateTicksPerStep: calculateTicksPerStep,
     setDebugMode: setDebugMode
 };

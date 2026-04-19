@@ -1,7 +1,7 @@
 # ADR-004: CommonJS Modularization
 
 **Date:** 2026-02-19
-**Status:** Implemented
+**Status:** Implemented (partially superseded — see [ADR-010](010-ui-native-revamp.md); `permute-commands.js` was removed with the OSC pathway)
 
 ## Context
 

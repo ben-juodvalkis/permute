@@ -73,14 +73,6 @@ function applyChanceMethods(proto) {
             handleError("applyChanceToClip", error, false);
         }
     };
-
-    /**
-     * Send chance value to Max UI (outlet 0).
-     * Called when chance changes from OSC or on init/setState.
-     */
-    proto.sendChanceState = function() {
-        outlet(0, "chance", this.chanceValue);
-    };
 }
 
 module.exports = {

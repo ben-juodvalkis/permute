@@ -37,6 +37,31 @@ var DEFAULT_DRUM_RACK_TRANSPOSE = 64;
 var INVALID_LIVE_API_ID = "0";
 var TASK_SCHEDULE_DELAY = 1;
 
+// ===== RATE ENUM =====
+// live.menu indices map to per-step tick durations. Entries with barsPerStep
+// scale with the current time-signature numerator so bar-length steps stay
+// musically correct in 3/4, 5/4, etc.
+var ENUM_RATES = [
+    { label: "8 bar", barsPerStep: 8 },
+    { label: "4 bar", barsPerStep: 4 },
+    { label: "2 bar", barsPerStep: 2 },
+    { label: "1 bar", barsPerStep: 1 },
+    { label: "1/2",   ticks: 960 },
+    { label: "1/4",   ticks: 480 },
+    { label: "1/8",   ticks: 240 },
+    { label: "1/16",  ticks: 120 }
+];
+
+var DEFAULT_RATE_ENUM = 5; // 1/4 note
+
+function ticksForRateEnum(index, timeSigNumerator) {
+    var entry = ENUM_RATES[index];
+    if (!entry) { entry = ENUM_RATES[DEFAULT_RATE_ENUM]; }
+    if (entry.ticks) { return entry.ticks; }
+    var numer = timeSigNumerator || DEFAULT_TIME_SIGNATURE;
+    return entry.barsPerStep * numer * TICKS_PER_QUARTER_NOTE;
+}
+
 // ===== VALUE TYPES =====
 
 /**
@@ -65,5 +90,8 @@ module.exports = {
     DEFAULT_DRUM_RACK_TRANSPOSE: DEFAULT_DRUM_RACK_TRANSPOSE,
     INVALID_LIVE_API_ID: INVALID_LIVE_API_ID,
     TASK_SCHEDULE_DELAY: TASK_SCHEDULE_DELAY,
-    VALUE_TYPES: VALUE_TYPES
+    VALUE_TYPES: VALUE_TYPES,
+    ENUM_RATES: ENUM_RATES,
+    DEFAULT_RATE_ENUM: DEFAULT_RATE_ENUM,
+    ticksForRateEnum: ticksForRateEnum
 };

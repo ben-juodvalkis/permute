@@ -8,11 +8,12 @@ var constants = require('permute-constants');
 var VALUE_TYPES = constants.VALUE_TYPES;
 var MAX_PATTERN_LENGTH = constants.MAX_PATTERN_LENGTH;
 var MIN_PATTERN_LENGTH = constants.MIN_PATTERN_LENGTH;
+var DEFAULT_RATE_ENUM = constants.DEFAULT_RATE_ENUM;
+var ticksForRateEnum = constants.ticksForRateEnum;
 
-// Import utils for debug and calculateTicksPerStep
+// Import utils for debug
 var utils = require('permute-utils');
 var debug = utils.debug;
-var calculateTicksPerStep = utils.calculateTicksPerStep;
 
 /**
  * Generic sequencer that manages pattern, timing, and step progression.
@@ -41,9 +42,9 @@ function Sequencer(name, valueType, patternLength) {
     // Cached active state — recomputed on pattern/step/length changes
     this._isActive = false;
 
-    // Timing
-    this.division = [1, 0, 0]; // Default 1 bar per step
-    this.ticksPerStep = 1920;
+    // Timing — ENUM_RATES index + resolved ticks
+    this.rateEnum = DEFAULT_RATE_ENUM;
+    this.ticksPerStep = ticksForRateEnum(DEFAULT_RATE_ENUM);
 
     // Reference to device (set by SequencerDevice)
     this.device = null;
@@ -124,13 +125,22 @@ Sequencer.prototype.setLength = function(length) {
 };
 
 /**
- * Set division timing.
- * @param {Array|string} division - Division in [bars, beats, ticks] or legacy string format
- * @param {number} timeSignature - Time signature numerator (for tick calculation)
+ * Set rate from ENUM_RATES index.
+ * @param {number} index - ENUM_RATES index (0..9)
+ * @param {number} timeSignature - Time signature numerator (for bar-length entries)
  */
-Sequencer.prototype.setDivision = function(division, timeSignature) {
-    this.division = division;
-    this.ticksPerStep = calculateTicksPerStep(division, timeSignature);
+Sequencer.prototype.setRateEnum = function(index, timeSignature) {
+    this.rateEnum = index;
+    this.ticksPerStep = ticksForRateEnum(index, timeSignature);
+};
+
+/**
+ * Recompute ticksPerStep using current rateEnum against a new time signature.
+ * Called by the time-signature observer.
+ * @param {number} timeSignature - Time signature numerator
+ */
+Sequencer.prototype.refreshTicksPerStep = function(timeSignature) {
+    this.ticksPerStep = ticksForRateEnum(this.rateEnum, timeSignature);
 };
 
 /**

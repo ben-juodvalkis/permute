@@ -59,10 +59,6 @@ Tracks `lastValues` per clip, applies deltas only on change:
 - `TransposeStrategy` - Parameter-based pitch shifting
 - `ObserverRegistry` - Centralized Live API observer management
 
-### Lazy Observer Activation (v6.0)
-
-Transport and time signature observers are only created when a sequencer becomes active (pattern has non-default values) or chance < 1.0. Reduces CPU overhead for idle devices.
-
 ### Temperature Transformation (v3.1)
 
 Uses note ID tracking for reversible pitch swapping:
@@ -76,7 +72,6 @@ Sets `note.probability` on all notes in the current clip (MIDI only):
 - Value 0.0–1.0 (0=never, 1=always play)
 - Applied immediately on value change, on clip change, and on transport start
 - Restored to 1.0 on transport stop
-- Activates playback observers when < 1.0 (ensures transport stop fires)
 
 ## Common Development Tasks
 

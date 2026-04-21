@@ -53,15 +53,6 @@ function SequencerDevice() {
 
     // Initialize mute pattern to all unmuted (1 = play, 0 = mute)
     this.sequencers.muteSequencer.pattern = [1, 1, 1, 1, 1, 1, 1, 1];
-    this.sequencers.muteSequencer.defaultValue = 1; // Override: mute default is unmuted (1)
-    this.sequencers.muteSequencer._recomputeActive();
-
-    // Set device reference on sequencers
-    for (var name in this.sequencers) {
-        if (this.sequencers.hasOwnProperty(name)) {
-            this.sequencers[name].device = this;
-        }
-    }
 
     // Instrument detection for pitch transformation
     this.instrumentType = 'unknown';
@@ -101,9 +92,6 @@ function SequencerDevice() {
     this._cachedClipId = null;
     this._clipCacheDirty = true;
 
-    // Lazy observer activation: transport/time-sig observers created on first active sequencer
-    this.playbackObserversActive = false;
-
     // Time signature tracking
     this.timeSignatureNumerator = 4; // Default to 4/4
 }
@@ -135,7 +123,8 @@ SequencerDevice.prototype.init = function() {
 
             this.detectInstrumentType();
             this.setupDeviceObserver();
-            this.checkAndActivateObservers();
+            this.setupTransportObserver();
+            this.setupTimeSignatureObserver();
 
             debug("init", "Initialization complete", {
                 trackType: this.trackState.type,
@@ -230,44 +219,6 @@ SequencerDevice.prototype.setupTimeSignatureObserver = function() {
     );
 
     this.observerRegistry.register('timeSignature', observer);
-};
-
-/**
- * Ensure playback observers are active.
- * Lazily creates transport and time signature observers when first needed.
- */
-SequencerDevice.prototype.ensurePlaybackObservers = function() {
-    if (this.playbackObserversActive) return;
-
-    debug("lazy", "Activating playback observers (sequencer became active)");
-
-    this.setupTransportObserver();
-    this.setupTimeSignatureObserver();
-    this.playbackObserversActive = true;
-
-    debug("lazy", "Playback observers now active");
-};
-
-/**
- * Check if any sequencer is active and ensure observers if so.
- * Called when pattern changes to potentially activate lazy observers.
- */
-SequencerDevice.prototype.checkAndActivateObservers = function() {
-    if (this.playbackObserversActive) return;
-
-    // Don't create observers before init() has established the track reference.
-    // UI elements may send restored values before init(), but Live API isn't ready yet.
-    // init() calls this again after setup.
-    if (!this.trackState.ref) return;
-
-    // Check if any sequencer is active or chance needs clip-change re-application
-    var muteActive = this.sequencers.muteSequencer.isActive();
-    var pitchActive = this.sequencers.pitchSequencer.isActive();
-    var chanceActive = this.chanceValue < 1.0;
-
-    if (muteActive || pitchActive || chanceActive) {
-        this.ensurePlaybackObservers();
-    }
 };
 
 // ===== TRANSPORT HANDLING =====
@@ -791,7 +742,7 @@ SequencerDevice.prototype.processWithSongTime = function(ticks) {
  * @param {number} ticks - Absolute tick position
  */
 SequencerDevice.prototype.processSequencerTick = function(seqName, seq, ticks) {
-    if (!seq || !seq.isActive()) return;
+    if (!seq) return;
 
     var newStep = seq.calculateStep(ticks);
 

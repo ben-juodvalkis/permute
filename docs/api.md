@@ -121,10 +121,8 @@ On transport stop, positions reset to `-1` and are emitted to outlet 0.
    and emit them downstream. These messages queue at inlet 1.
 3. live.thisdevice → init()
      → track reference, instrument detection, device observer
-     → checkAndActivateObservers() (noop if no sequencer active yet)
+     → transport + time-signature observers created unconditionally
 4. Queued inlet-1 messages flush, populating state via handleMaxUICommand
-5. First non-default UI message flips the sequencer active flag and
-   lazily creates transport + time-signature observers.
 ```
 
-No handshake, no `request_ui_values`. If a UI object emits a stored value before `init()`, JS stores it immediately; the observer activation check runs on every pattern change and again at the end of `init()`.
+No handshake, no `request_ui_values`. If a UI object emits a stored value before `init()`, JS stores it immediately; transport and time-sig observers are always active once `init()` completes.

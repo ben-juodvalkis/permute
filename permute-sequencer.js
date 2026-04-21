@@ -35,19 +35,9 @@ function Sequencer(name, valueType, patternLength) {
 
     this.currentStep = -1;
 
-    // Default value for this sequencer (used by isActive)
-    // Mute defaults to 1 (unmuted), pitch defaults to 0 (no shift)
-    this.defaultValue = this.valueType.default;
-
-    // Cached active state — recomputed on pattern/step/length changes
-    this._isActive = false;
-
     // Timing — ENUM_RATES index + resolved ticks
     this.rateEnum = DEFAULT_RATE_ENUM;
     this.ticksPerStep = ticksForRateEnum(DEFAULT_RATE_ENUM);
-
-    // Reference to device (set by SequencerDevice)
-    this.device = null;
 
     // Last value applied via parameter-based transpose (clip-independent).
     // Distinct from SequencerDevice.lastValues[clipId] which tracks per-clip note-based deltas.
@@ -71,11 +61,6 @@ Sequencer.prototype.setPattern = function(pattern) {
     }
     this.pattern = validated;
     this.patternLength = validated.length;
-    this._recomputeActive();
-
-    if (this.device && this.device.checkAndActivateObservers) {
-        this.device.checkAndActivateObservers();
-    }
 };
 
 /**
@@ -87,11 +72,6 @@ Sequencer.prototype.setStep = function(index, value) {
     if (index >= 0 && index < this.pattern.length) {
         if (this.valueType.validate(value)) {
             this.pattern[index] = value;
-            this._recomputeActive();
-
-            if (this.device && this.device.checkAndActivateObservers) {
-                this.device.checkAndActivateObservers();
-            }
         } else {
             debug("sequencer", "Invalid value " + value + " for step " + index);
         }
@@ -116,7 +96,6 @@ Sequencer.prototype.setLength = function(length) {
     }
 
     this.patternLength = newLength;
-    this._recomputeActive();
 
     // Reset step if out of bounds
     if (this.currentStep >= newLength) {
@@ -162,31 +141,6 @@ Sequencer.prototype.getCurrentValue = function() {
         return this.pattern[this.currentStep];
     }
     return this.valueType.default;
-};
-
-/**
- * Recompute cached active state.
- * Called when pattern, step, or length changes.
- */
-Sequencer.prototype._recomputeActive = function() {
-    for (var i = 0; i < this.patternLength; i++) {
-        if (this.pattern[i] !== this.defaultValue) {
-            this._isActive = true;
-            return;
-        }
-    }
-    this._isActive = false;
-};
-
-/**
- * Check if sequencer is active (has non-default pattern values).
- * Returns cached value — recomputed on pattern/step/length changes.
- * - Mute: active if any step is 0 (muted)
- * - Pitch: active if any step is 1 (shifted)
- * @returns {boolean} - True if sequencer has active pattern
- */
-Sequencer.prototype.isActive = function() {
-    return this._isActive;
 };
 
 module.exports = {

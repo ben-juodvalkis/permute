@@ -34,14 +34,6 @@ function applyChanceMethods(proto) {
 
         this.chanceValue = newValue;
 
-        // Activate playback observers if chance becomes non-default.
-        // Needed so onClipChanged can re-apply chance to new clips.
-        // Note: observers are intentionally not deactivated when returning to 1.0 —
-        // once active they remain for the session lifetime (consistent with temperature).
-        if (newValue < 1.0) {
-            this.checkAndActivateObservers();
-        }
-
         // Apply to current clip immediately
         this.applyChanceToClip();
 

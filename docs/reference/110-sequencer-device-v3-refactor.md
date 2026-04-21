@@ -1,9 +1,11 @@
 # ADR 110: Sequencer Device v3.0 Refactor - Delta-Based State Tracking
 
-**Status:** Implemented
+> **HISTORICAL — pre-Permute Looping-repo ADR.** Preserved for archival context. The delta-based state tracking introduced here is still the core of Permute's architecture (see [../../CLAUDE.md](../../CLAUDE.md)), but the surrounding layer system, OSC surface, and file names no longer apply. Cross-links to `docs-archive/...` point into the Looping repo.
+
+**Status:** Implemented (still the basis of Permute's state tracking)
 **Date:** 2025-11-08
 **Author:** Claude + User
-**Related:** [sequencer-v3-refactor-plan.md](../../docs-archive/sequencer-v3-refactor-plan.md), [sequencer-v3-refactor-log.md](../../docs-archive/sequencer-v3-refactor-log.md)
+**Related:** `sequencer-v3-refactor-plan.md`, `sequencer-v3-refactor-log.md` (both in the Looping repo's `docs-archive/`)
 
 ## Context
 

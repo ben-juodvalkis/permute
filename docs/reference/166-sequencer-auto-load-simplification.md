@@ -1,7 +1,9 @@
 # ADR-166: Sequencer Auto-Load & Lazy Observer Simplification
 
+> **HISTORICAL — pre-Permute Looping-repo ADR.** Preserved for archival context. Auto-load (driven by Looping's `liveAPI-v6.js`) and the lazy-observer scheme are not part of standalone Permute; the device is manually dropped on a track and observers are created unconditionally at init.
+
 **Date:** 2026-01-22
-**Status:** Implemented
+**Status:** Implemented (superseded for Permute)
 
 ## Context
 

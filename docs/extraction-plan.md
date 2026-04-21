@@ -1,7 +1,9 @@
 # Permute Extraction Plan
 
+> **HISTORICAL — Completed.** This document is the original extraction plan from the Looping repository and is preserved for archival context only. The architecture it describes (OSC, `Sequencer.amxd`, `sequencer-device.js`) no longer matches the codebase. For the current communication contract see [api.md](api.md); for the current architecture overview see [../CLAUDE.md](../CLAUDE.md) and [adr/010-ui-native-revamp.md](adr/010-ui-native-revamp.md).
+
 **Date:** 2026-01-24
-**Status:** Planning
+**Status:** Completed (archived)
 **Goal:** Extract the sequencer Max4Live device into a standalone repository called `permute`
 
 ## Summary

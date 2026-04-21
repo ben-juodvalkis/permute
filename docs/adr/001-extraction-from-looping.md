@@ -1,7 +1,7 @@
 # ADR-001: Extraction from Looping Repository
 
 **Date:** 2026-01-24
-**Status:** In Progress
+**Status:** Completed
 
 ## Context
 

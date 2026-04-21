@@ -1,6 +1,8 @@
 # ADR 106: Temperature Transformation for Organic Loop Variation
 
-**Status:** Accepted
+> **HISTORICAL — pre-Permute Looping-repo ADR.** Preserved for archival context. Temperature still exists in Permute with the same algorithmic core, but the "two-phase layer system" and the "parameter 21" reference below pre-date the delta-based refactor and the UI-native revamp. For the current architecture see [../../CLAUDE.md](../../CLAUDE.md) and for the current parameter layout see [../api.md](../api.md).
+
+**Status:** Accepted (algorithm still in use; surrounding architecture superseded)
 **Date:** 2025-11-05
 **Deciders:** Ben, Claude
 **Related:** ADR 096 (Sequencer v2.0 Architecture)

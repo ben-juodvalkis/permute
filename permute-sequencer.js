@@ -105,7 +105,7 @@ Sequencer.prototype.setLength = function(length) {
 
 /**
  * Set rate from ENUM_RATES index.
- * @param {number} index - ENUM_RATES index (0..9)
+ * @param {number} index - ENUM_RATES index (0..7)
  * @param {number} timeSignature - Time signature numerator (for bar-length entries)
  */
 Sequencer.prototype.setRateEnum = function(index, timeSignature) {

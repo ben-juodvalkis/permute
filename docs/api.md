@@ -27,7 +27,7 @@ Each message is emitted by one `live.*` object in the patcher, prepended with th
 | `pitch_length <v>` | 1..8 | `live.menu` | |
 | `pitch_rate <i>` | 0..7 | `live.menu` | |
 | `temperature <v>` | 0.0..1.0 | `live.dial` | 0=off, 1=max organic variation |
-| `chance <v>` | 0.0..1.0 | `live.dial` | Note probability, 1=always play |
+| `chance <v>` | 0.0..1.0 | `live.dial` | Note probability, 1=always play. Persists across transport start/stop (not reset like mute/pitch). |
 
 JS never echoes these values back. The `live.*` object already holds the value.
 

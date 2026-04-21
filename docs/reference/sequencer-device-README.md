@@ -1,5 +1,7 @@
 # Sequencer Device for Max4Live
 
+> **HISTORICAL — pre-Permute, pre-UI-native revamp.** This is the original README from the Looping repository's `sequencer-device.js`, preserved for archival context. The OSC protocol, the `mute pattern` / `mute division` message forms, `temperature_reset` / `temperature_shuffle`, the 31-arg broadcast, and the origin-tag scheme described below are **not part of the current Permute device**. For the current contract see [../api.md](../api.md); for the current architecture see [../../CLAUDE.md](../../CLAUDE.md) and [../adr/010-ui-native-revamp.md](../adr/010-ui-native-revamp.md).
+
 A multi-transformation device for Ableton Live that provides mute sequencing, pitch sequencing, and organic loop variation for both MIDI and audio clips.
 
 ## Overview

@@ -1,5 +1,7 @@
 # Note Chance: Implementation Status & Migration Guide
 
+> **HISTORICAL — Completed.** Chance has shipped (see [ADR-009](../adr/009-note-chance-probability.md)). This document describes the implementation *as planned*, including an OSC/broadcast surface and `inlet 2` wiring that were subsequently removed in the UI-native revamp ([ADR-010](../adr/010-ui-native-revamp.md)). For the current chance contract, see [../api.md](../api.md).
+
 ## Part 1: Permute Side — DONE
 
 See `docs/adr/009-note-chance-probability.md` for the full architecture decision record.

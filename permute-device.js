@@ -796,10 +796,10 @@ SequencerDevice.prototype.handleTransport = function(messageName, args) {
  * Protocol:
  *   mute_step <i> <v>       i=0..7, v=0/1
  *   mute_length <v>         1..8
- *   mute_rate <enum_index>  0..9 (ENUM_RATES)
+ *   mute_rate <enum_index>  0..7 (ENUM_RATES)
  *   pitch_step <i> <v>
  *   pitch_length <v>
- *   pitch_rate <enum_index>
+ *   pitch_rate <enum_index>  0..7
  *   temperature <v>         0.0..1.0
  *   chance <v>              0.0..1.0
  */

@@ -1,7 +1,9 @@
 # ADR-163: Sequencer Origin-Tagged Broadcasts
 
+> **HISTORICAL — pre-Permute Looping-repo ADR.** Preserved for archival context. The origin-tagged OSC broadcast scheme described here was removed in Permute's UI-native revamp; see [../adr/010-ui-native-revamp.md](../adr/010-ui-native-revamp.md) for the replacement.
+
 ## Status
-Accepted
+Accepted (superseded by [ADR-010](../adr/010-ui-native-revamp.md) in Permute)
 
 ## Context
 

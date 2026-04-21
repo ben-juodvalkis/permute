@@ -71,7 +71,7 @@ Uses note ID tracking for reversible pitch swapping:
 Sets `note.probability` on all notes in the current clip (MIDI only):
 - Value 0.0–1.0 (0=never, 1=always play)
 - Applied immediately on value change, on clip change, and on transport start
-- Restored to 1.0 on transport stop
+- Persists across transport start/stop (the slider value is authoritative; notes always reflect it)
 
 ## Common Development Tasks
 

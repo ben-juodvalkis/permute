@@ -234,15 +234,17 @@ SequencerDevice.prototype.setupInstrumentParamsObserver = function() {
         this.instrumentDevice.path,
         "parameters",
         function(args) {
-            defer(function() {
-                // Only re-detect if we're not already on parameter_transpose —
-                // if we're already mapped, a macro list change might just be
-                // a user tweak and shouldn't blow away our strategy.
-                if (self.instrumentType !== 'parameter_transpose') {
-                    debug("instrument", "Params changed on instrument, re-detecting");
-                    self.detectInstrumentType();
-                }
-            });
+            // Only re-detect if we're not already on parameter_transpose —
+            // if we're already mapped, a macro list change might just be
+            // a user tweak and shouldn't blow away our strategy. This guard
+            // runs synchronously (not inside defer) so that a burst of
+            // parameter-list mutations from Simpler.replace_sample is a no-op
+            // once we've already landed on parameter_transpose.
+            if (self.instrumentType === 'parameter_transpose') return;
+
+            // Coalesce bursts (Simpler.replace_sample fires many parameter
+            // notifications) into one debounced detection via _scheduleDetection.
+            self._scheduleDetection();
         }
     );
 

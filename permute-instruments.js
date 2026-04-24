@@ -89,6 +89,21 @@ function TransposeStrategy(device, transposeParam, shiftAmount, paramName) {
     this.transposeParam = transposeParam;
     this.shiftAmount = shiftAmount;
     this.paramName = paramName;
+    // Read param bounds once. Simpler Transpose is -48..+48; rack macros
+    // are 0..127. Using the param's own bounds means the clamp is always
+    // correct without a per-device branch.
+    this.paramMin = MIDI_MIN;
+    this.paramMax = MIDI_MAX;
+    try {
+        if (transposeParam && transposeParam.id !== INVALID_LIVE_API_ID) {
+            var minResult = transposeParam.get("min");
+            var maxResult = transposeParam.get("max");
+            if (minResult && minResult[0] !== undefined) this.paramMin = minResult[0];
+            if (maxResult && maxResult[0] !== undefined) this.paramMax = maxResult[0];
+        }
+    } catch (e) {
+        handleError("TransposeStrategy.ctor", e, false);
+    }
 }
 TransposeStrategy.prototype = Object.create(InstrumentStrategy.prototype);
 TransposeStrategy.prototype.constructor = TransposeStrategy;
@@ -122,8 +137,8 @@ TransposeStrategy.prototype.applyTranspose = function(shouldShiftUp) {
             newValue = this.originalTranspose;
         }
 
-        newValue = Math.max(MIDI_MIN, Math.min(MIDI_MAX, newValue));
-        debug("transpose", "setting param to " + newValue + " (original=" + this.originalTranspose + ", shift=" + this.shiftAmount + ")");
+        newValue = Math.max(this.paramMin, Math.min(this.paramMax, newValue));
+        debug("transpose", "setting param to " + newValue + " (original=" + this.originalTranspose + ", shift=" + this.shiftAmount + ", bounds=[" + this.paramMin + "," + this.paramMax + "])");
         this.transposeParam.set("value", newValue);
 
         debug("transpose", "Applied " + (shouldShiftUp ? "+" : "") +

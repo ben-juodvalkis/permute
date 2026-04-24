@@ -7,11 +7,15 @@
 // ===== Configuration =====
 // Transpose configuration for pitch sequencer
 var TRANSPOSE_CONFIG = {
+    // shiftAmount is in the param's native units. For rack macros mapped to
+    // transpose internally (Custom E), the macro's 0-127 maps to a narrower
+    // semitone range, so the number is different. For params that are
+    // already semitone-scaled (Simpler Transpose, -48..+48), 12 = one octave.
     parameterNames: [
         { name: "custom e", shiftAmount: 21 },
         { name: "pitch", shiftAmount: 16 },
-        { name: "transpose", shiftAmount: 16 },
-        { name: "octave", shiftAmount: 16 }
+        { name: "transpose", shiftAmount: 12 },
+        { name: "octave", shiftAmount: 12 }
     ],
     defaultShiftAmount: 12,
     // Devices that use parameter-based transposition (if a named param is found).
@@ -19,7 +23,8 @@ var TRANSPOSE_CONFIG = {
     // Fallback to note_transpose if no named param is found even for listed devices.
     parameterTransposeDevices: [
         "DrumGroupDevice",
-        "InstrumentGroupDevice"
+        "InstrumentGroupDevice",
+        "OriginalSimpler"
     ]
 };
 

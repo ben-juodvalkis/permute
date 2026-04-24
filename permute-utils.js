@@ -8,7 +8,7 @@ var constants = require('permute-constants');
 var INVALID_LIVE_API_ID = constants.INVALID_LIVE_API_ID;
 var TASK_SCHEDULE_DELAY = constants.TASK_SCHEDULE_DELAY;
 
-var DEBUG_MODE = false; // Set to true for development
+var DEBUG_MODE = true; // Set to true for development
 
 /**
  * Debug logging utility.
@@ -109,10 +109,14 @@ function findTransposeParameterByName(device) {
             priorityOrder.push(lowerName);
         }
 
-        // Get parameter count - limit to 17 (typical rack macro count from constants.json)
+        // Scan the full parameter list. Racks are typically 17 macros;
+        // Simpler's Transpose is at index 11; other instruments can expose
+        // a Transpose parameter at higher indices. We early-exit on the
+        // first priority match, so scanning more is cheap when the param
+        // is near the top.
         var params = device.get("parameters");
         if (!params) return null;
-        var paramCount = Math.min(Math.floor(params.length / 2), 17);  // Live returns [id, id, id...]
+        var paramCount = Math.floor(params.length / 2);  // Live returns [id, id, id...]
         if (paramCount === 0) return null;
 
         // Scan parameters, collecting matches

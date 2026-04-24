@@ -94,6 +94,9 @@ function SequencerDevice() {
 
     // Time signature tracking
     this.timeSignatureNumerator = 4; // Default to 4/4
+
+    // Debounce handle for coalesced instrument re-detection
+    this._pendingDetectionTask = null;
 }
 
 // ===== INITIALIZATION =====
@@ -152,18 +155,66 @@ SequencerDevice.prototype.setupDeviceObserver = function() {
         this.trackState.ref.path,
         "devices",
         function(args) {
-            defer(function() {
-                // Revert current transpose before re-detecting, so we
-                // don't capture a shifted value as the new "original".
-                if (self.instrumentType === 'parameter_transpose') {
-                    self.instrumentStrategy.revertTranspose();
-                }
-                self.detectInstrumentType();
-            });
+            // Hard-detach the stale instrument_params observer SYNCHRONOUSLY,
+            // before Live's dispatcher queues more notifications against it.
+            // A Simpler.replace_sample fires a burst of ~20 devices notifications
+            // in ~50ms; each one would otherwise find instrument_params still
+            // bound to a stale path and SendMessage into _path_listener_callback.
+            self.observerRegistry.unregister('instrument_params');
+            self.instrumentDevice = null;
+            self.instrumentDeviceId = null;
+            if (self.instrumentStrategy && self.instrumentStrategy.transposeParam) {
+                self.instrumentStrategy.transposeParam = null;
+            }
+            // Coalesce burst into a single detection after the tree settles.
+            self._scheduleDetection();
         }
     );
 
     this.observerRegistry.register('device', observer);
+};
+
+/**
+ * Debounced re-detection. A burst of 'devices' notifications (e.g. during
+ * Simpler.replace_sample) collapses to one detectInstrumentType call after
+ * the last notification + DETECTION_DEBOUNCE_MS. Last-wins semantics.
+ */
+var DETECTION_DEBOUNCE_MS = 75;
+
+SequencerDevice.prototype._scheduleDetection = function() {
+    var self = this;
+    if (this._pendingDetectionTask) {
+        try { this._pendingDetectionTask.cancel(); } catch (e) {}
+    }
+    if (typeof Task === 'undefined') {
+        // Fallback: run inline if Task isn't available (non-Max test env).
+        try {
+            if (self.instrumentType === 'parameter_transpose' && self.instrumentStrategy) {
+                self.instrumentStrategy.revertTranspose();
+            }
+            self.detectInstrumentType();
+        } catch (error) {
+            handleError("_scheduleDetection", error, false);
+        }
+        return;
+    }
+    this._pendingDetectionTask = new Task(function() {
+        self._pendingDetectionTask = null;
+        if (!self.trackState.ref || self.trackState.ref.id === INVALID_LIVE_API_ID) {
+            return;
+        }
+        try {
+            if (self.instrumentType === 'parameter_transpose' &&
+                self.instrumentStrategy &&
+                typeof self.instrumentStrategy.revertTranspose === 'function') {
+                self.instrumentStrategy.revertTranspose();
+            }
+            self.detectInstrumentType();
+        } catch (error) {
+            handleError("_scheduleDetection", error, false);
+        }
+    }, this);
+    this._pendingDetectionTask.schedule(DETECTION_DEBOUNCE_MS);
 };
 
 /**
@@ -1017,6 +1068,12 @@ function anything() {
 
 // Handle notifydeleted
 function notifydeleted() {
+    // Cancel any pending debounced detection before its Task fires against
+    // a dead device reference.
+    if (sequencer._pendingDetectionTask) {
+        try { sequencer._pendingDetectionTask.cancel(); } catch (e) {}
+        sequencer._pendingDetectionTask = null;
+    }
     // Use observer registry for cleanup (includes temperature loop_jump observer)
     sequencer.observerRegistry.clearAll();
 }

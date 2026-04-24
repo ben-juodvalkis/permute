@@ -176,23 +176,12 @@ MuteStrategy.prototype = Object.create(InstrumentStrategy.prototype);
 MuteStrategy.prototype.constructor = MuteStrategy;
 
 MuteStrategy.prototype.applyMute = function(shouldMute) {
-    debug("mute", "applyMute(" + shouldMute + ") device=" + (this.device && this.device.id) +
-          " param=" + (this.muteParam && this.muteParam.id) +
-          " paramPath=" + (this.muteParam && this.muteParam.path));
-    if (!this.device || !this.muteParam) {
-        debug("mute", "applyMute BAIL: missing device or muteParam");
-        return;
-    }
-    if (this.muteParam.id === INVALID_LIVE_API_ID) {
-        debug("mute", "applyMute BAIL: muteParam id invalid");
-        return;
-    }
+    if (!this.device || !this.muteParam) return;
+    if (this.muteParam.id === INVALID_LIVE_API_ID) return;
     try {
         var newValue = shouldMute ? this.mutedValue : this.playingValue;
         this.muteParam.set("value", newValue);
-        var readback = this.muteParam.get("value");
-        debug("mute", "parameter_mute -> wrote " + newValue + ", readback=" +
-              (readback && readback[0]));
+        debug("mute", "parameter_mute -> " + newValue);
     } catch (error) {
         handleError("MuteStrategy.applyMute", error, false);
     }

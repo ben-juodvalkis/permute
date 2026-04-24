@@ -25,12 +25,26 @@ ObserverRegistry.prototype.register = function(name, observer) {
 };
 
 /**
+ * Fully detach a LiveAPI observer from Live's dispatcher.
+ * Setting property alone only stops future notifications — path/id must also
+ * be cleared so queued notifications against a stale path cannot fire
+ * SendMessage errors into _path_listener_callback.
+ */
+function hardDetach(obs) {
+    if (!obs) return;
+    try { obs.property = ""; } catch (e) {}
+    try { obs.path = ""; } catch (e) {}
+    try { obs.id = 0; } catch (e) {}
+}
+
+/**
  * Unregister an observer by name.
  * @param {string} name - Observer name
  */
 ObserverRegistry.prototype.unregister = function(name) {
     if (this.observers[name]) {
-        this.observers[name].property = "";
+        hardDetach(this.observers[name]);
+        this.observers[name] = null;
         delete this.observers[name];
     }
 };
@@ -41,7 +55,8 @@ ObserverRegistry.prototype.unregister = function(name) {
 ObserverRegistry.prototype.clearAll = function() {
     for (var name in this.observers) {
         if (this.observers.hasOwnProperty(name)) {
-            this.observers[name].property = "";
+            hardDetach(this.observers[name]);
+            this.observers[name] = null;
         }
     }
     this.observers = {};

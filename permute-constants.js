@@ -28,6 +28,18 @@ var TRANSPOSE_CONFIG = {
     ]
 };
 
+// Parameter-based mute special case. When the track's first instrument is
+// an Instrument Rack whose name matches `rackName` (case-insensitive exact
+// match), the mute sequencer toggles macro `paramIndex` between
+// `mutedValue` and `playingValue` instead of editing clip notes.
+var SHAKERS_MUTE_CONFIG = {
+    rackClassName: "InstrumentGroupDevice",
+    rackName: "shakers",
+    paramIndex: 0,
+    mutedValue: 0,
+    playingValue: 1
+};
+
 // ===== CONSTANTS =====
 var TICKS_PER_QUARTER_NOTE = 480;
 var MIDI_MIN = 0;
@@ -83,6 +95,7 @@ var VALUE_TYPES = {
 
 module.exports = {
     TRANSPOSE_CONFIG: TRANSPOSE_CONFIG,
+    SHAKERS_MUTE_CONFIG: SHAKERS_MUTE_CONFIG,
     TICKS_PER_QUARTER_NOTE: TICKS_PER_QUARTER_NOTE,
     MIDI_MIN: MIDI_MIN,
     MIDI_MAX: MIDI_MAX,

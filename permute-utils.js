@@ -228,6 +228,7 @@ module.exports = {
     debug: debug,
     handleError: handleError,
     parseNotesResponse: parseNotesResponse,
+    getDeviceParameter: getDeviceParameter,
     findTransposeParameterByName: findTransposeParameterByName,
     isParameterTransposeDevice: isParameterTransposeDevice,
     createObserver: createObserver,

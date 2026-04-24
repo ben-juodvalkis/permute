@@ -158,7 +158,52 @@ TransposeStrategy.prototype.revertTranspose = function() {
 };
 
 /**
- * DefaultInstrumentStrategy - Default (no device-based transpose).
+ * MuteStrategy - Parameter-based mute via a rack macro.
+ * Writes one of two values (muted / playing) to a device parameter.
+ *
+ * @param {LiveAPI} device - Device containing the mute parameter
+ * @param {LiveAPI} muteParam - The mute parameter API object
+ * @param {number} mutedValue - Value to write when muting
+ * @param {number} playingValue - Value to write when unmuting
+ */
+function MuteStrategy(device, muteParam, mutedValue, playingValue) {
+    InstrumentStrategy.call(this, device);
+    this.muteParam = muteParam;
+    this.mutedValue = mutedValue;
+    this.playingValue = playingValue;
+}
+MuteStrategy.prototype = Object.create(InstrumentStrategy.prototype);
+MuteStrategy.prototype.constructor = MuteStrategy;
+
+MuteStrategy.prototype.applyMute = function(shouldMute) {
+    debug("mute", "applyMute(" + shouldMute + ") device=" + (this.device && this.device.id) +
+          " param=" + (this.muteParam && this.muteParam.id) +
+          " paramPath=" + (this.muteParam && this.muteParam.path));
+    if (!this.device || !this.muteParam) {
+        debug("mute", "applyMute BAIL: missing device or muteParam");
+        return;
+    }
+    if (this.muteParam.id === INVALID_LIVE_API_ID) {
+        debug("mute", "applyMute BAIL: muteParam id invalid");
+        return;
+    }
+    try {
+        var newValue = shouldMute ? this.mutedValue : this.playingValue;
+        this.muteParam.set("value", newValue);
+        var readback = this.muteParam.get("value");
+        debug("mute", "parameter_mute -> wrote " + newValue + ", readback=" +
+              (readback && readback[0]));
+    } catch (error) {
+        handleError("MuteStrategy.applyMute", error, false);
+    }
+};
+
+MuteStrategy.prototype.revertMute = function() {
+    this.applyMute(false);
+};
+
+/**
+ * DefaultInstrumentStrategy - Default (no device-based transpose or mute).
  */
 function DefaultInstrumentStrategy() {
     InstrumentStrategy.call(this, null);
@@ -174,8 +219,17 @@ DefaultInstrumentStrategy.prototype.revertTranspose = function() {
     // No-op for default instruments
 };
 
+DefaultInstrumentStrategy.prototype.applyMute = function(value) {
+    // No-op for default instruments
+};
+
+DefaultInstrumentStrategy.prototype.revertMute = function() {
+    // No-op for default instruments
+};
+
 module.exports = {
     InstrumentDetector: InstrumentDetector,
     TransposeStrategy: TransposeStrategy,
+    MuteStrategy: MuteStrategy,
     DefaultInstrumentStrategy: DefaultInstrumentStrategy
 };

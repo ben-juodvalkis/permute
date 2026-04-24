@@ -25,6 +25,7 @@ var OCTAVE_SEMITONES = constants.OCTAVE_SEMITONES;
 var DEFAULT_GAIN_VALUE = constants.DEFAULT_GAIN_VALUE;
 var MUTED_GAIN = constants.MUTED_GAIN;
 var INVALID_LIVE_API_ID = constants.INVALID_LIVE_API_ID;
+var SHAKERS_MUTE_CONFIG = constants.SHAKERS_MUTE_CONFIG;
 var ticksForRateEnum = constants.ticksForRateEnum;
 
 var debug = utils.debug;
@@ -32,6 +33,7 @@ var handleError = utils.handleError;
 var parseNotesResponse = utils.parseNotesResponse;
 var findTransposeParameterByName = utils.findTransposeParameterByName;
 var isParameterTransposeDevice = utils.isParameterTransposeDevice;
+var getDeviceParameter = utils.getDeviceParameter;
 var createObserver = utils.createObserver;
 var defer = utils.defer;
 
@@ -41,6 +43,7 @@ var TransportState = stateClasses.TransportState;
 
 var InstrumentDetector = instruments.InstrumentDetector;
 var TransposeStrategy = instruments.TransposeStrategy;
+var MuteStrategy = instruments.MuteStrategy;
 var DefaultInstrumentStrategy = instruments.DefaultInstrumentStrategy;
 
 // ===== MAIN SEQUENCER DEVICE =====
@@ -59,6 +62,11 @@ function SequencerDevice() {
     this.instrumentDevice = null;
     this.instrumentDeviceId = null;
     this.instrumentStrategy = new DefaultInstrumentStrategy();
+
+    // Instrument detection for mute transformation. Defaults to editing notes;
+    // switches to 'parameter_mute' for specific racks (e.g. "Shakers").
+    this.instrumentMuteType = 'note_mute';
+    this.muteStrategy = new DefaultInstrumentStrategy();
 
     // Temperature state (non-sequenced)
     this.temperatureValue = 0.0;
@@ -410,10 +418,14 @@ SequencerDevice.prototype.onTransportStop = function() {
 
                     // Undo mute if was on (always applies, independent of temperature)
                     if (this.lastValues[clipId] && this.lastValues[clipId].mute === 0) {
-                        for (var i = 0; i < notes.notes.length; i++) {
-                            notes.notes[i].mute = 0; // Unmute all
+                        if (this.instrumentMuteType === 'parameter_mute') {
+                            this.muteStrategy.revertMute();
+                        } else {
+                            for (var i = 0; i < notes.notes.length; i++) {
+                                notes.notes[i].mute = 0; // Unmute all
+                            }
+                            changed = true;
                         }
-                        changed = true;
                     }
 
                     if (changed) {
@@ -566,11 +578,16 @@ SequencerDevice.prototype.executeBatchMIDI = function(clip, clipId, pending) {
     if ('mute' in pending) {
         if (pending.mute !== this.lastValues[clipId].mute) {
             var shouldMute = (pending.mute === 0); // 0 = mute, 1 = play
-            for (var i = 0; i < notes.notes.length; i++) {
-                notes.notes[i].mute = shouldMute ? 1 : 0; // Live API: 1=muted, 0=unmuted
+            if (this.instrumentMuteType === 'parameter_mute') {
+                // Toggle the rack macro; don't touch clip notes
+                this.muteStrategy.applyMute(shouldMute);
+            } else {
+                for (var i = 0; i < notes.notes.length; i++) {
+                    notes.notes[i].mute = shouldMute ? 1 : 0; // Live API: 1=muted, 0=unmuted
+                }
+                changed = true;
             }
             this.lastValues[clipId].mute = pending.mute;
-            changed = true;
         }
     }
 
@@ -685,6 +702,8 @@ SequencerDevice.prototype.detectInstrumentType = function() {
     this.instrumentDevice = null;
     this.instrumentDeviceId = null;
     this.instrumentStrategy = new DefaultInstrumentStrategy();
+    this.instrumentMuteType = 'note_mute';
+    this.muteStrategy = new DefaultInstrumentStrategy();
     this.observerRegistry.unregister('instrument_params');
 
     if (this.trackState.type !== 'midi') return;
@@ -728,6 +747,27 @@ SequencerDevice.prototype.detectInstrumentType = function() {
     } else {
         this.instrumentType = 'note_transpose';
         debug("instrument", "Using note-based shifting (default)");
+    }
+
+    // Shakers special case: if the first instrument is an Instrument Rack
+    // named "Shakers" (case-insensitive exact match), mute by toggling its
+    // first device parameter (index 0) instead of editing notes in the clip.
+    if (detectedClassName === SHAKERS_MUTE_CONFIG.rackClassName) {
+        var rackNameResult = result.device.get("name");
+        var rackName = rackNameResult && rackNameResult[0] ? String(rackNameResult[0]) : "";
+        if (rackName.toLowerCase() === SHAKERS_MUTE_CONFIG.rackName) {
+            var muteParam = getDeviceParameter(result.device, SHAKERS_MUTE_CONFIG.paramIndex);
+            if (muteParam && muteParam.id !== INVALID_LIVE_API_ID) {
+                this.instrumentMuteType = 'parameter_mute';
+                this.muteStrategy = new MuteStrategy(
+                    result.device,
+                    muteParam,
+                    SHAKERS_MUTE_CONFIG.mutedValue,
+                    SHAKERS_MUTE_CONFIG.playingValue
+                );
+                debug("instrument", "Shakers rack detected — using param 0 for mute");
+            }
+        }
     }
 
     // Always re-arm the params observer on the (possibly new) instrument device,
@@ -909,6 +949,17 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, seq, ticks) {
             var shouldShiftUp = (value === 1);
             if (value !== seq.lastParameterValue) {
                 this.instrumentStrategy.applyTranspose(shouldShiftUp);
+                seq.lastParameterValue = value;
+            }
+            outlet(0, seqName + "_current", newStep);
+            return;
+        }
+
+        // parameter_mute also applies directly without a clip
+        if (seqName === 'mute' && this.instrumentMuteType === 'parameter_mute') {
+            if (value !== seq.lastParameterValue) {
+                var shouldMute = (value === 0); // 0 = mute, 1 = play
+                this.muteStrategy.applyMute(shouldMute);
                 seq.lastParameterValue = value;
             }
             outlet(0, seqName + "_current", newStep);

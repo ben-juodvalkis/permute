@@ -8,7 +8,7 @@ var constants = require('permute-constants');
 var INVALID_LIVE_API_ID = constants.INVALID_LIVE_API_ID;
 var TASK_SCHEDULE_DELAY = constants.TASK_SCHEDULE_DELAY;
 
-var DEBUG_MODE = false; // Set to true for development
+var DEBUG_MODE = true; // Set to true for development
 
 /**
  * Debug logging utility.

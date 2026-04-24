@@ -167,6 +167,38 @@ SequencerDevice.prototype.setupDeviceObserver = function() {
 };
 
 /**
+ * Setup observer on the current instrument device's parameters list.
+ * Fires when macros are added/renamed/remapped — covers the case where
+ * detection ran before the rack had named its transpose macro, and the
+ * case where the user renames a macro after initial detection.
+ */
+SequencerDevice.prototype.setupInstrumentParamsObserver = function() {
+    if (!this.instrumentDevice || this.instrumentDevice.id === INVALID_LIVE_API_ID) {
+        this.observerRegistry.unregister('instrument_params');
+        return;
+    }
+
+    var self = this;
+    var observer = createObserver(
+        this.instrumentDevice.path,
+        "parameters",
+        function(args) {
+            defer(function() {
+                // Only re-detect if we're not already on parameter_transpose —
+                // if we're already mapped, a macro list change might just be
+                // a user tweak and shouldn't blow away our strategy.
+                if (self.instrumentType !== 'parameter_transpose') {
+                    debug("instrument", "Params changed on instrument, re-detecting");
+                    self.detectInstrumentType();
+                }
+            });
+        }
+    );
+
+    this.observerRegistry.register('instrument_params', observer);
+};
+
+/**
  * Setup transport observer to detect play/stop.
  */
 SequencerDevice.prototype.setupTransportObserver = function() {
@@ -583,9 +615,16 @@ chance.applyChanceMethods(SequencerDevice.prototype);
 
 // ===== INSTRUMENT DETECTION =====
 
+// Retry delays (ms) when a listed rack is detected but its macros aren't
+// named yet — covers the race where the devices observer fires before Live
+// has populated the rack's parameter list.
+var DETECT_RETRY_DELAYS_MS = [50, 200, 500, 1200];
+
 /**
  * Detect instrument and configure transpose strategy.
  * Scans for named transpose parameters on the track's instrument device.
+ * Retries on a listed rack if no named param is found, in case the rack's
+ * macro list is still being populated.
  */
 SequencerDevice.prototype.detectInstrumentType = function() {
     // Reset to defaults
@@ -593,6 +632,7 @@ SequencerDevice.prototype.detectInstrumentType = function() {
     this.instrumentDevice = null;
     this.instrumentDeviceId = null;
     this.instrumentStrategy = new DefaultInstrumentStrategy();
+    this.observerRegistry.unregister('instrument_params');
 
     if (this.trackState.type !== 'midi') return;
 
@@ -629,11 +669,68 @@ SequencerDevice.prototype.detectInstrumentType = function() {
         } else {
             this.instrumentType = 'note_transpose';
             debug("instrument", "Listed device but no named param found, falling back to note-based shifting");
+            // Schedule retries — the rack's macros may not be populated yet.
+            this.scheduleDetectionRetries(0);
         }
     } else {
         this.instrumentType = 'note_transpose';
         debug("instrument", "Using note-based shifting (default)");
     }
+
+    // Always re-arm the params observer on the (possibly new) instrument device,
+    // so later renames/remaps trigger a re-detect.
+    this.setupInstrumentParamsObserver();
+};
+
+/**
+ * Schedule a retry of detectInstrumentType using a backoff schedule.
+ * Stops as soon as we land on parameter_transpose or exhaust retries.
+ * @param {number} attemptIndex - Index into DETECT_RETRY_DELAYS_MS
+ */
+SequencerDevice.prototype.scheduleDetectionRetries = function(attemptIndex) {
+    if (attemptIndex >= DETECT_RETRY_DELAYS_MS.length) {
+        debug("instrument", "Detection retries exhausted, staying on note_transpose");
+        return;
+    }
+
+    var self = this;
+    var delayMs = DETECT_RETRY_DELAYS_MS[attemptIndex];
+
+    if (typeof Task === 'undefined') return;
+
+    var t = new Task(function() {
+        // Bail if we've already landed on parameter_transpose (e.g. params
+        // observer beat us to it).
+        if (self.instrumentType === 'parameter_transpose') {
+            debug("instrument", "Retry " + attemptIndex + " skipped — already on parameter_transpose");
+            return;
+        }
+
+        // Only retry if the instrument device is still a listed rack with
+        // no named param — otherwise there's nothing to wait for.
+        if (!self.instrumentDevice || self.instrumentDevice.id === INVALID_LIVE_API_ID) {
+            debug("instrument", "Retry " + attemptIndex + " aborted — instrument device gone");
+            return;
+        }
+        if (!isParameterTransposeDevice(self.instrumentDevice)) return;
+
+        var transposeResult = findTransposeParameterByName(self.instrumentDevice);
+        if (transposeResult) {
+            self.instrumentType = 'parameter_transpose';
+            self.instrumentStrategy = new TransposeStrategy(
+                self.instrumentDevice,
+                transposeResult.param,
+                transposeResult.shiftAmount,
+                transposeResult.name
+            );
+            debug("instrument", "Retry " + attemptIndex + " succeeded — found '" +
+                  transposeResult.name + "' after " + delayMs + "ms");
+        } else {
+            debug("instrument", "Retry " + attemptIndex + " at " + delayMs + "ms: still no named param");
+            self.scheduleDetectionRetries(attemptIndex + 1);
+        }
+    }, this);
+    t.schedule(delayMs);
 };
 
 // ===== CLIP MANAGEMENT =====

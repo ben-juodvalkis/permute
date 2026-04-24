@@ -95,10 +95,12 @@ function SequencerDevice() {
     // Observer registry
     this.observerRegistry = new ObserverRegistry();
 
-    // Clip cache: avoids redundant LiveAPI IPC on every tick
+    // Clip cache, kept fresh by playing_slot_index / fired_slot_index
+    // observers. Reads on the per-tick path are pure cache hits.
     this._cachedClip = null;
     this._cachedClipId = null;
-    this._clipCacheDirty = true;
+    this._playingSlotIndex = -1;
+    this._firedSlotIndex = -1;
 
     // Time signature tracking
     this.timeSignatureNumerator = 4; // Default to 4/4
@@ -136,6 +138,7 @@ SequencerDevice.prototype.init = function() {
             this.setupDeviceObserver();
             this.setupTransportObserver();
             this.setupTimeSignatureObserver();
+            this.setupSlotObservers();
 
             debug("init", "Initialization complete", {
                 trackType: this.trackState.type,
@@ -283,6 +286,36 @@ SequencerDevice.prototype.setupTransportObserver = function() {
     );
 
     this.observerRegistry.register('transport', observer);
+};
+
+/**
+ * Setup slot observers on the track so the clip cache stays fresh without
+ * per-tick IPC. Observers fire on bind with the current value, which
+ * auto-populates _cachedClip during init.
+ *
+ * Precedence: playing_slot_index when >=0, else fired_slot_index. The
+ * callbacks update the cached slot indices and ask _refreshClipFromSlots
+ * to rebuild the LiveAPI handle. No IPC happens in the per-tick path.
+ */
+SequencerDevice.prototype.setupSlotObservers = function() {
+    if (!this.trackState.ref) return;
+
+    var self = this;
+    var trackPath = this.trackState.ref.path;
+
+    var playingObs = createObserver(trackPath, "playing_slot_index", function(args) {
+        var v = args && args.length > 1 ? args[1] : -1;
+        self._playingSlotIndex = (typeof v === 'number') ? v : -1;
+        self._refreshClipFromSlots();
+    });
+    this.observerRegistry.register('playing_slot', playingObs);
+
+    var firedObs = createObserver(trackPath, "fired_slot_index", function(args) {
+        var v = args && args.length > 1 ? args[1] : -1;
+        self._firedSlotIndex = (typeof v === 'number') ? v : -1;
+        self._refreshClipFromSlots();
+    });
+    this.observerRegistry.register('fired_slot', firedObs);
 };
 
 /**
@@ -829,77 +862,66 @@ SequencerDevice.prototype.scheduleDetectionRetries = function(attemptIndex) {
 // ===== CLIP MANAGEMENT =====
 
 /**
- * Invalidate the clip cache.
- * Called at the start of each tick, and on transport/clip change events.
+ * Force a re-resolution of the cached clip from the current slot indices.
+ * Slot observers keep the cache fresh automatically; this is for callers
+ * that need an explicit refresh (e.g. clip_changed message from the patcher).
  */
 SequencerDevice.prototype.invalidateClipCache = function() {
-    this._clipCacheDirty = true;
+    this._refreshClipFromSlots();
+};
+
+/**
+ * Resolve the current clip from cached slot indices and update _cachedClip.
+ * Called from the playing_slot_index / fired_slot_index observer callbacks
+ * and from invalidateClipCache. Performs at most one LiveAPI path resolve.
+ */
+SequencerDevice.prototype._refreshClipFromSlots = function() {
+    if (!this.trackState.ref) {
+        this._setCachedClip(null);
+        return;
+    }
+    var slot = (this._playingSlotIndex >= 0) ? this._playingSlotIndex : this._firedSlotIndex;
+    if (slot < 0) {
+        this._setCachedClip(null);
+        return;
+    }
+    try {
+        var clipPath = this.trackState.ref.path + " clip_slots " + slot + " clip";
+        var clip = new LiveAPI(clipPath);
+        if (clip && clip.id !== INVALID_LIVE_API_ID) {
+            this._setCachedClip(clip);
+        } else {
+            this._setCachedClip(null);
+        }
+    } catch (error) {
+        handleError("_refreshClipFromSlots", error, false);
+        this._setCachedClip(null);
+    }
+};
+
+/**
+ * Update _cachedClip / _cachedClipId. On identity change, clear the
+ * temperature loop_jump observer and update clipState — same cleanup the
+ * old per-tick getCurrentClip used to do when clip.id changed.
+ */
+SequencerDevice.prototype._setCachedClip = function(clip) {
+    var newId = clip ? clip.id : null;
+    if (newId !== this._cachedClipId) {
+        this.clearTemperatureLoopJumpObserver();
+        this.clipState.update(newId);
+    }
+    this._cachedClip = clip;
+    this._cachedClipId = newId;
 };
 
 /**
  * Get the currently playing clip on the track.
- * Uses a per-tick cache to avoid redundant LiveAPI IPC calls.
- * Clears temperature observer when clip changes.
- * @returns {LiveAPI|null} - Live API clip object or null if no clip playing
+ * Pure cache read — kept fresh by playing_slot_index / fired_slot_index
+ * observers. No IPC on the per-tick path.
+ * @returns {LiveAPI|null}
  */
 SequencerDevice.prototype.getCurrentClip = function() {
-    // Return cached clip if cache is clean
-    if (!this._clipCacheDirty && this._cachedClip) {
-        return this._cachedClip;
-    }
-    if (!this._clipCacheDirty && this._cachedClip === null) {
-        return null;
-    }
-
-    if (!this.trackState.ref) {
-        this._cachedClip = null;
-        this._cachedClipId = null;
-        this._clipCacheDirty = false;
-        return null;
-    }
-
-    try {
-        // Try playing_slot_index first
-        var slotIndex = this.trackState.ref.get("playing_slot_index");
-
-        // If no playing slot, try fired_slot_index
-        if (!slotIndex || slotIndex[0] < 0) {
-            slotIndex = this.trackState.ref.get("fired_slot_index");
-        }
-
-        // Early exit if no slot found
-        if (!slotIndex || slotIndex[0] < 0) {
-            this._cachedClip = null;
-            this._cachedClipId = null;
-            this._clipCacheDirty = false;
-            return null;
-        }
-
-        var clipPath = this.trackState.ref.path + " clip_slots " + slotIndex[0] + " clip";
-        var clip = new LiveAPI(clipPath);
-
-        if (clip && clip.id !== INVALID_LIVE_API_ID) {
-            if (this.clipState.hasChanged(clip.id)) {
-                this.clearTemperatureLoopJumpObserver();
-                this.clipState.update(clip.id);
-            }
-            this._cachedClip = clip;
-            this._cachedClipId = clip.id;
-            this._clipCacheDirty = false;
-            return clip;
-        }
-
-        this._cachedClip = null;
-        this._cachedClipId = null;
-        this._clipCacheDirty = false;
-        return null;
-    } catch (error) {
-        handleError("getCurrentClip", error, false);
-        this._cachedClip = null;
-        this._cachedClipId = null;
-        this._clipCacheDirty = false;
-        return null;
-    }
+    return this._cachedClip;
 };
 
 // ===== SHARED SEQUENCER FUNCTIONALITY =====
@@ -916,7 +938,7 @@ SequencerDevice.prototype.processWithSongTime = function(ticks) {
     var lookaheadTicks = 120;
     var targetTicks = ticks + lookaheadTicks;
 
-    this.invalidateClipCache();
+    // Clip cache stays fresh via slot observers — no per-tick refresh needed.
 
     this.processSequencerTick('mute', this.sequencers.muteSequencer, targetTicks);
     this.processSequencerTick('pitch', this.sequencers.pitchSequencer, targetTicks);
@@ -942,30 +964,29 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, seq, ticks) {
 
     try {
         var value = seq.getCurrentValue();
-        var clip = this.getCurrentClip();
 
-        // parameter_transpose applies directly without a clip (device parameter only)
+        // Parameter-based paths don't need a clip — handle them before any
+        // clip lookup IPC. On parameter_transpose / parameter_mute tracks
+        // this is the entire hot path per tick.
         if (seqName === 'pitch' && this.instrumentType === 'parameter_transpose') {
-            var shouldShiftUp = (value === 1);
             if (value !== seq.lastParameterValue) {
-                this.instrumentStrategy.applyTranspose(shouldShiftUp);
+                this.instrumentStrategy.applyTranspose(value === 1);
                 seq.lastParameterValue = value;
             }
             outlet(0, seqName + "_current", newStep);
             return;
         }
 
-        // parameter_mute also applies directly without a clip
         if (seqName === 'mute' && this.instrumentMuteType === 'parameter_mute') {
             if (value !== seq.lastParameterValue) {
-                var shouldMute = (value === 0); // 0 = mute, 1 = play
-                this.muteStrategy.applyMute(shouldMute);
+                this.muteStrategy.applyMute(value === 0);
                 seq.lastParameterValue = value;
             }
             outlet(0, seqName + "_current", newStep);
             return;
         }
 
+        var clip = this.getCurrentClip();
         if (clip) {
             this.scheduleBatchApply(clip.id, seqName, value);
         }

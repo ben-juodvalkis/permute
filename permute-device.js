@@ -99,6 +99,7 @@ function SequencerDevice() {
     // observers. Reads on the per-tick path are pure cache hits.
     this._cachedClip = null;
     this._cachedClipId = null;
+    this._cachedClipPath = null;
     this._playingSlotIndex = -1;
     this._firedSlotIndex = -1;
 
@@ -731,13 +732,16 @@ var DETECT_RETRY_DELAYS_MS = [50, 200, 500, 1200];
  */
 SequencerDevice.prototype.detectInstrumentType = function() {
     // Reset to defaults
+    var hadInstrument = this.instrumentDevice !== null;
     this.instrumentType = 'unknown';
     this.instrumentDevice = null;
     this.instrumentDeviceId = null;
     this.instrumentStrategy = new DefaultInstrumentStrategy();
     this.instrumentMuteType = 'note_mute';
     this.muteStrategy = new DefaultInstrumentStrategy();
-    this.observerRegistry.unregister('instrument_params');
+    if (hadInstrument) {
+        this.observerRegistry.unregister('instrument_params');
+    }
 
     if (this.trackState.type !== 'midi') return;
 
@@ -877,25 +881,28 @@ SequencerDevice.prototype.invalidateClipCache = function() {
  */
 SequencerDevice.prototype._refreshClipFromSlots = function() {
     if (!this.trackState.ref) {
-        this._setCachedClip(null);
+        this._setCachedClip(null, null);
         return;
     }
     var slot = (this._playingSlotIndex >= 0) ? this._playingSlotIndex : this._firedSlotIndex;
     if (slot < 0) {
-        this._setCachedClip(null);
+        this._setCachedClip(null, null);
+        return;
+    }
+    var clipPath = this.trackState.ref.path + " clip_slots " + slot + " clip";
+    if (clipPath === this._cachedClipPath && this._cachedClip) {
         return;
     }
     try {
-        var clipPath = this.trackState.ref.path + " clip_slots " + slot + " clip";
         var clip = new LiveAPI(clipPath);
         if (clip && clip.id !== INVALID_LIVE_API_ID) {
-            this._setCachedClip(clip);
+            this._setCachedClip(clip, clipPath);
         } else {
-            this._setCachedClip(null);
+            this._setCachedClip(null, null);
         }
     } catch (error) {
         handleError("_refreshClipFromSlots", error, false);
-        this._setCachedClip(null);
+        this._setCachedClip(null, null);
     }
 };
 
@@ -904,7 +911,7 @@ SequencerDevice.prototype._refreshClipFromSlots = function() {
  * temperature loop_jump observer and update clipState — same cleanup the
  * old per-tick getCurrentClip used to do when clip.id changed.
  */
-SequencerDevice.prototype._setCachedClip = function(clip) {
+SequencerDevice.prototype._setCachedClip = function(clip, clipPath) {
     var newId = clip ? clip.id : null;
     if (newId !== this._cachedClipId) {
         this.clearTemperatureLoopJumpObserver();
@@ -912,6 +919,7 @@ SequencerDevice.prototype._setCachedClip = function(clip) {
     }
     this._cachedClip = clip;
     this._cachedClipId = newId;
+    this._cachedClipPath = clipPath || null;
 };
 
 /**

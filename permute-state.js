@@ -19,13 +19,15 @@ TrackState.prototype.update = function(track) {
     this.id = track ? track.id : null;
     if (track) {
         var hasMidiInput = track.get("has_midi_input");
-        var hasAudioInput = track.get("has_audio_input");
         if (hasMidiInput && hasMidiInput[0] === 1) {
             this.type = 'midi';
-        } else if (hasAudioInput && hasAudioInput[0] === 1) {
-            this.type = 'audio';
         } else {
-            this.type = 'unknown';
+            var hasAudioInput = track.get("has_audio_input");
+            if (hasAudioInput && hasAudioInput[0] === 1) {
+                this.type = 'audio';
+            } else {
+                this.type = 'unknown';
+            }
         }
     } else {
         this.type = 'unknown';

@@ -167,18 +167,14 @@ SequencerDevice.prototype.setupDeviceObserver = function() {
         this.trackState.ref.path,
         "devices",
         function(args) {
-            // Hard-detach the stale instrument_params observer SYNCHRONOUSLY,
-            // before Live's dispatcher queues more notifications against it.
-            // A Simpler.replace_sample fires a burst of ~20 devices notifications
-            // in ~50ms; each one would otherwise find instrument_params still
-            // bound to a stale path and SendMessage into _path_listener_callback.
-            self.observerRegistry.unregister('instrument_params');
+            // Synchronously null the stale instrument refs before returning
+            // to Live's dispatcher. Coalesce burst into a single detection
+            // after the tree settles.
             self.instrumentDevice = null;
             self.instrumentDeviceId = null;
             if (self.instrumentStrategy && self.instrumentStrategy.transposeParam) {
                 self.instrumentStrategy.transposeParam = null;
             }
-            // Coalesce burst into a single detection after the tree settles.
             self._scheduleDetection();
         }
     );
@@ -227,40 +223,6 @@ SequencerDevice.prototype._scheduleDetection = function() {
         }
     }, this);
     this._pendingDetectionTask.schedule(DETECTION_DEBOUNCE_MS);
-};
-
-/**
- * Setup observer on the current instrument device's parameters list.
- * Fires when macros are added/renamed/remapped — covers the case where
- * detection ran before the rack had named its transpose macro, and the
- * case where the user renames a macro after initial detection.
- */
-SequencerDevice.prototype.setupInstrumentParamsObserver = function() {
-    if (!this.instrumentDevice || this.instrumentDevice.id === INVALID_LIVE_API_ID) {
-        this.observerRegistry.unregister('instrument_params');
-        return;
-    }
-
-    var self = this;
-    var observer = createObserver(
-        this.instrumentDevice.path,
-        "parameters",
-        function(args) {
-            // Only re-detect if we're not already on parameter_transpose —
-            // if we're already mapped, a macro list change might just be
-            // a user tweak and shouldn't blow away our strategy. This guard
-            // runs synchronously (not inside defer) so that a burst of
-            // parameter-list mutations from Simpler.replace_sample is a no-op
-            // once we've already landed on parameter_transpose.
-            if (self.instrumentType === 'parameter_transpose') return;
-
-            // Coalesce bursts (Simpler.replace_sample fires many parameter
-            // notifications) into one debounced detection via _scheduleDetection.
-            self._scheduleDetection();
-        }
-    );
-
-    this.observerRegistry.register('instrument_params', observer);
 };
 
 /**
@@ -732,16 +694,12 @@ var DETECT_RETRY_DELAYS_MS = [50, 200, 500, 1200];
  */
 SequencerDevice.prototype.detectInstrumentType = function() {
     // Reset to defaults
-    var hadInstrument = this.instrumentDevice !== null;
     this.instrumentType = 'unknown';
     this.instrumentDevice = null;
     this.instrumentDeviceId = null;
     this.instrumentStrategy = new DefaultInstrumentStrategy();
     this.instrumentMuteType = 'note_mute';
     this.muteStrategy = new DefaultInstrumentStrategy();
-    if (hadInstrument) {
-        this.observerRegistry.unregister('instrument_params');
-    }
 
     if (this.trackState.type !== 'midi') return;
 
@@ -810,10 +768,6 @@ SequencerDevice.prototype.detectInstrumentType = function() {
                 SHAKERS_MUTE_CONFIG.paramIndex + " for mute");
         }
     }
-
-    // Always re-arm the params observer on the (possibly new) instrument device,
-    // so later renames/remaps trigger a re-detect.
-    this.setupInstrumentParamsObserver();
 };
 
 /**
@@ -833,8 +787,7 @@ SequencerDevice.prototype.scheduleDetectionRetries = function(attemptIndex) {
     if (typeof Task === 'undefined') return;
 
     var t = new Task(function() {
-        // Bail if we've already landed on parameter_transpose (e.g. params
-        // observer beat us to it).
+        // Bail if we've already landed on parameter_transpose.
         if (self.instrumentType === 'parameter_transpose') {
             debug("instrument", "Retry " + attemptIndex + " skipped — already on parameter_transpose");
             return;

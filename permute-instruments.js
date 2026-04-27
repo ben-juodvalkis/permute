@@ -83,12 +83,19 @@ InstrumentStrategy.prototype.revertTranspose = function() {
  * @param {LiveAPI} transposeParam - The transpose parameter API object
  * @param {number} shiftAmount - Amount to shift for octave (16 or 21)
  * @param {string} paramName - Name of the parameter (for debugging)
+ * @param {number|null} cachedBaseline - Previously captured baseline; if
+ *   provided, the strategy uses it instead of reading the live param value.
+ *   Used when a strategy is rebuilt (e.g. after track devices change) while
+ *   the param may still hold a shifted value from the prior strategy.
  */
-function TransposeStrategy(device, transposeParam, shiftAmount, paramName) {
+function TransposeStrategy(device, transposeParam, shiftAmount, paramName, cachedBaseline) {
     InstrumentStrategy.call(this, device);
     this.transposeParam = transposeParam;
     this.shiftAmount = shiftAmount;
     this.paramName = paramName;
+    if (cachedBaseline !== undefined && cachedBaseline !== null) {
+        this.originalTranspose = cachedBaseline;
+    }
     // Read param bounds once. Simpler Transpose is -48..+48; rack macros
     // are 0..127. Using the param's own bounds means the clamp is always
     // correct without a per-device branch.

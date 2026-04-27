@@ -63,6 +63,13 @@ function SequencerDevice() {
     this.instrumentDeviceId = null;
     this.instrumentStrategy = new DefaultInstrumentStrategy();
 
+    // Persist captured transpose baselines across strategy rebuilds, keyed by
+    // device id. Adding/removing FX on the track recreates the strategy; if
+    // we re-read the param at that moment it may still hold our shifted
+    // value, which would compound on the next shift (+12 → +24).
+    // deviceId -> baseline value
+    this.transposeBaselines = {};
+
     // Instrument detection for mute transformation. Defaults to editing notes;
     // switches to 'parameter_mute' for specific racks (e.g. "Shakers").
     this.instrumentMuteType = 'note_mute';
@@ -167,6 +174,15 @@ SequencerDevice.prototype.setupDeviceObserver = function() {
         this.trackState.ref.path,
         "devices",
         function(args) {
+            // Revert first, while the param handle is still valid, so the
+            // next detection captures the true baseline rather than our
+            // shifted value (otherwise +12 becomes the new "original" and
+            // the next shift compounds to +24).
+            if (self.instrumentType === 'parameter_transpose' &&
+                self.instrumentStrategy &&
+                typeof self.instrumentStrategy.revertTranspose === 'function') {
+                try { self.instrumentStrategy.revertTranspose(); } catch (e) {}
+            }
             // Synchronously null the stale instrument refs before returning
             // to Live's dispatcher. Coalesce burst into a single detection
             // after the tree settles.
@@ -197,9 +213,6 @@ SequencerDevice.prototype._scheduleDetection = function() {
     if (typeof Task === 'undefined') {
         // Fallback: run inline if Task isn't available (non-Max test env).
         try {
-            if (self.instrumentType === 'parameter_transpose' && self.instrumentStrategy) {
-                self.instrumentStrategy.revertTranspose();
-            }
             self.detectInstrumentType();
         } catch (error) {
             handleError("_scheduleDetection", error, false);
@@ -212,11 +225,6 @@ SequencerDevice.prototype._scheduleDetection = function() {
             return;
         }
         try {
-            if (self.instrumentType === 'parameter_transpose' &&
-                self.instrumentStrategy &&
-                typeof self.instrumentStrategy.revertTranspose === 'function') {
-                self.instrumentStrategy.revertTranspose();
-            }
             self.detectInstrumentType();
         } catch (error) {
             handleError("_scheduleDetection", error, false);
@@ -724,11 +732,30 @@ SequencerDevice.prototype.detectInstrumentType = function() {
         var transposeResult = findTransposeParameterByName(result.device);
         if (transposeResult) {
             this.instrumentType = 'parameter_transpose';
+            // First time seeing this device: snapshot the param NOW, before
+            // any shifts — that's the only moment the live param value is
+            // guaranteed to be the user's intended baseline.
+            var cachedBaseline = this.transposeBaselines[result.deviceId];
+            if (cachedBaseline === undefined) {
+                try {
+                    var v = transposeResult.param.get("value");
+                    if (v && v[0] !== undefined) {
+                        cachedBaseline = v[0];
+                        this.transposeBaselines[result.deviceId] = cachedBaseline;
+                        debug("instrument", "Captured fresh baseline " + cachedBaseline + " for device " + result.deviceId);
+                    }
+                } catch (e) {
+                    handleError("detectInstrumentType:baseline", e, false);
+                }
+            } else {
+                debug("instrument", "Seeded baseline " + cachedBaseline + " from cache for device " + result.deviceId);
+            }
             this.instrumentStrategy = new TransposeStrategy(
                 result.device,
                 transposeResult.param,
                 transposeResult.shiftAmount,
-                transposeResult.name
+                transposeResult.name,
+                cachedBaseline
             );
             debug("instrument", "Found transpose param '" + transposeResult.name +
                   "' at index " + transposeResult.index +
@@ -804,14 +831,17 @@ SequencerDevice.prototype.scheduleDetectionRetries = function(attemptIndex) {
         var transposeResult = findTransposeParameterByName(self.instrumentDevice);
         if (transposeResult) {
             self.instrumentType = 'parameter_transpose';
+            var cachedBaseline = self.transposeBaselines[self.instrumentDeviceId];
             self.instrumentStrategy = new TransposeStrategy(
                 self.instrumentDevice,
                 transposeResult.param,
                 transposeResult.shiftAmount,
-                transposeResult.name
+                transposeResult.name,
+                cachedBaseline
             );
             debug("instrument", "Retry " + attemptIndex + " succeeded — found '" +
-                  transposeResult.name + "' after " + delayMs + "ms");
+                  transposeResult.name + "' after " + delayMs + "ms" +
+                  (cachedBaseline !== undefined ? " (seeded baseline=" + cachedBaseline + ")" : ""));
         } else {
             debug("instrument", "Retry " + attemptIndex + " at " + delayMs + "ms: still no named param");
             self.scheduleDetectionRetries(attemptIndex + 1);

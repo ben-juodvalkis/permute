@@ -161,14 +161,21 @@ TransposeStrategy.prototype.revertTranspose = function() {
  * MuteStrategy - Parameter-based mute via a rack macro.
  * Writes one of two values (muted / playing) to a device parameter.
  *
+ * Holds the device path + param index rather than a cached LiveAPI handle.
+ * The handle is re-resolved on each write because rack mutations (chain
+ * changes, device add/remove) can invalidate cached parameter handles, and
+ * dereferencing a stale handle from the audio thread crashes Live's
+ * parameter cache (EXC_BAD_ACCESS at 0x58 on com.apple.audio.IOThread).
+ *
  * @param {LiveAPI} device - Device containing the mute parameter
- * @param {LiveAPI} muteParam - The mute parameter API object
+ * @param {number} paramIndex - Index of the mute parameter on the device
  * @param {number} mutedValue - Value to write when muting
  * @param {number} playingValue - Value to write when unmuting
  */
-function MuteStrategy(device, muteParam, mutedValue, playingValue) {
+function MuteStrategy(device, paramIndex, mutedValue, playingValue) {
     InstrumentStrategy.call(this, device);
-    this.muteParam = muteParam;
+    this.devicePath = device ? device.path : null;
+    this.paramIndex = paramIndex;
     this.mutedValue = mutedValue;
     this.playingValue = playingValue;
 }
@@ -176,11 +183,12 @@ MuteStrategy.prototype = Object.create(InstrumentStrategy.prototype);
 MuteStrategy.prototype.constructor = MuteStrategy;
 
 MuteStrategy.prototype.applyMute = function(shouldMute) {
-    if (!this.device || !this.muteParam) return;
-    if (this.muteParam.id === INVALID_LIVE_API_ID) return;
+    if (!this.devicePath) return;
     try {
+        var paramApi = new LiveAPI(this.devicePath + " parameters " + this.paramIndex);
+        if (!paramApi || paramApi.id === INVALID_LIVE_API_ID) return;
         var newValue = shouldMute ? this.mutedValue : this.playingValue;
-        this.muteParam.set("value", newValue);
+        paramApi.set("value", newValue);
         debug("mute", "parameter_mute -> " + newValue);
     } catch (error) {
         handleError("MuteStrategy.applyMute", error, false);

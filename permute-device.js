@@ -787,23 +787,27 @@ SequencerDevice.prototype.detectInstrumentType = function() {
     }
 
     // Shakers special case: if the first instrument is an Instrument Rack
-    // named "Shakers" (case-insensitive exact match), mute by toggling its
-    // first device parameter (index 0) instead of editing notes in the clip.
+    // named "Shakers" (case-insensitive exact match), mute by writing the
+    // mute macro (paramIndex 4 → mapped to a Utility Gain) between
+    // mutedValue / playingValue instead of editing notes in the clip.
+    //
+    // The macro must target a *value-only* parameter (Gain, Volume, etc.)
+    // and not anything that mutates the rack's audio-graph topology
+    // (Device On, Chain Mute/Solo, Chain Selector). Topology-mutating writes
+    // at sequencer rate crash Live's audio thread.
     if (detectedClassName === SHAKERS_MUTE_CONFIG.rackClassName) {
         var rackNameResult = result.device.get("name");
         var rackName = rackNameResult && rackNameResult[0] ? String(rackNameResult[0]) : "";
         if (rackName.toLowerCase() === SHAKERS_MUTE_CONFIG.rackName) {
-            var muteParam = getDeviceParameter(result.device, SHAKERS_MUTE_CONFIG.paramIndex);
-            if (muteParam && muteParam.id !== INVALID_LIVE_API_ID) {
-                this.instrumentMuteType = 'parameter_mute';
-                this.muteStrategy = new MuteStrategy(
-                    result.device,
-                    muteParam,
-                    SHAKERS_MUTE_CONFIG.mutedValue,
-                    SHAKERS_MUTE_CONFIG.playingValue
-                );
-                debug("instrument", "Shakers rack detected — using param 0 for mute");
-            }
+            this.instrumentMuteType = 'parameter_mute';
+            this.muteStrategy = new MuteStrategy(
+                result.device,
+                SHAKERS_MUTE_CONFIG.paramIndex,
+                SHAKERS_MUTE_CONFIG.mutedValue,
+                SHAKERS_MUTE_CONFIG.playingValue
+            );
+            debug("instrument", "Shakers rack detected — using paramIndex " +
+                SHAKERS_MUTE_CONFIG.paramIndex + " for mute");
         }
     }
 

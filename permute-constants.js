@@ -32,12 +32,18 @@ var TRANSPOSE_CONFIG = {
 // an Instrument Rack whose name matches `rackName` (case-insensitive exact
 // match), the mute sequencer toggles macro `paramIndex` between
 // `mutedValue` and `playingValue` instead of editing clip notes.
+//
+// Param index layout for an Instrument Rack: 0 = Device On, 1..8 = Macro 1..8.
+// We target Macro 4 (paramIndex 4) — toggling it is a plain mapped-value write,
+// safe at audio rate. We previously targeted paramIndex 0 (Device On), which
+// rewires the rack's audio graph on each toggle and crashed Live's audio
+// thread under sequencer-rate flips on the Shakers track.
 var SHAKERS_MUTE_CONFIG = {
     rackClassName: "InstrumentGroupDevice",
     rackName: "shakers",
-    paramIndex: 0,
+    paramIndex: 4,
     mutedValue: 0,
-    playingValue: 1
+    playingValue: 127
 };
 
 // ===== CONSTANTS =====

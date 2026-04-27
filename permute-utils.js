@@ -119,8 +119,12 @@ function findTransposeParameterByName(device) {
         var paramCount = Math.floor(params.length / 2);  // Live returns [id, id, id...]
         if (paramCount === 0) return null;
 
-        // Scan parameters, collecting matches
+        // Scan parameters, collecting matches. Also note macros 1 & 2 by name
+        // so we can apply a wider shift on racks tagged FX1/FX2 (those map
+        // Transpose to a narrower range internally).
         var matches = {};  // lowerName -> { index, param }
+        var macro1Name = null;
+        var macro2Name = null;
         for (var i = 0; i < paramCount; i++) {
             var param = getDeviceParameter(device, i);
 
@@ -133,6 +137,8 @@ function findTransposeParameterByName(device) {
                 if (nameLookup[paramName]) {
                     matches[paramName] = { index: i, param: param };
                 }
+                if (i === 1) macro1Name = paramName;
+                else if (i === 2) macro2Name = paramName;
             }
         }
 
@@ -141,11 +147,16 @@ function findTransposeParameterByName(device) {
             var name = priorityOrder[i];
             if (matches[name]) {
                 var config = nameLookup[name];
+                var shiftAmount = config.shiftAmount;
+                if (name === "transpose" && macro1Name === "fx1" && macro2Name === "fx2") {
+                    shiftAmount = 16;
+                    debug("transpose", "FX1/FX2 macros detected — using shift 16");
+                }
                 debug("transpose", "Found '" + name + "' at param " + matches[name].index);
                 return {
                     index: matches[name].index,
                     param: matches[name].param,
-                    shiftAmount: config.shiftAmount,
+                    shiftAmount: shiftAmount,
                     name: name
                 };
             }

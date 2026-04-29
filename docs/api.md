@@ -113,6 +113,8 @@ Each sequencer tick:
 
 On transport stop, positions reset to `-1` and are emitted to outlet 0.
 
+When the device's track is soloed, the mute sequencer's value is coerced to `1` (play) for every tick; on un-solo it resumes the pattern. The flip itself triggers an immediate batch apply so the change doesn't wait for the next step. The pitch sequencer is unaffected.
+
 ## Init flow
 
 ```
@@ -121,7 +123,7 @@ On transport stop, positions reset to `-1` and are emitted to outlet 0.
    and emit them downstream. These messages queue at inlet 1.
 3. live.thisdevice → init()
      → track reference, instrument detection, device observer
-     → transport + time-signature observers created unconditionally
+     → transport + time-signature + slot + solo observers created unconditionally
 4. Queued inlet-1 messages flush, populating state via handleMaxUICommand
 ```
 

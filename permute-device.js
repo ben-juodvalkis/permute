@@ -113,6 +113,10 @@ function SequencerDevice() {
     // Time signature tracking
     this.timeSignatureNumerator = 4; // Default to 4/4
 
+    // Track solo override: when the device's track is soloed, force the mute
+    // sequencer to play (value=1). Reverts to pattern on un-solo.
+    this._soloActive = false;
+
     // Debounce handle for coalesced instrument re-detection
     this._pendingDetectionTask = null;
 }
@@ -147,6 +151,7 @@ SequencerDevice.prototype.init = function() {
             this.setupTransportObserver();
             this.setupTimeSignatureObserver();
             this.setupSlotObservers();
+            this.setupSoloObserver();
 
             debug("init", "Initialization complete", {
                 trackType: this.trackState.type,
@@ -287,6 +292,59 @@ SequencerDevice.prototype.setupSlotObservers = function() {
         self._refreshClipFromSlots();
     });
     this.observerRegistry.register('fired_slot', firedObs);
+};
+
+/**
+ * Observe the device's own track's `solo` property. When soloed, the mute
+ * sequencer is overridden to always play (value coerced to 1 in
+ * processSequencerTick). On un-solo, the pattern's value resumes; the
+ * delta-aware batch path in executeBatchMIDI/Audio handles the restore by
+ * comparing against lastValues.
+ *
+ * On flip we immediately schedule a batch apply for the current clip so the
+ * change takes effect without waiting for the next step boundary.
+ */
+SequencerDevice.prototype.setupSoloObserver = function() {
+    if (!this.trackState.ref) return;
+
+    var self = this;
+
+    var observer = createObserver(
+        this.trackState.ref.path,
+        "solo",
+        function(args) {
+            // Live emits ["solo", <0|1>]; tolerate the bare-value shape too.
+            var rawVal;
+            if (args && args.length >= 2) rawVal = args[1];
+            else if (args && args.length === 1) rawVal = args[0];
+            else rawVal = 0;
+            var solo = (rawVal === 1 || rawVal === true);
+
+            if (solo === self._soloActive) return;
+            self._soloActive = solo;
+
+            var muteSeq = self.sequencers && self.sequencers.muteSequencer;
+            if (!muteSeq) return;
+
+            var value = solo ? 1 : muteSeq.getCurrentValue();
+
+            if (self.instrumentMuteType === 'parameter_mute') {
+                if (!self.muteStrategy) return;
+                if (value !== muteSeq.lastParameterValue) {
+                    self.muteStrategy.applyMute(value === 0);
+                    muteSeq.lastParameterValue = value;
+                }
+                return;
+            }
+
+            var clip = self.getCurrentClip();
+            if (clip) {
+                self.scheduleBatchApply(clip.id, 'mute', value);
+            }
+        }
+    );
+
+    this.observerRegistry.register('solo', observer);
 };
 
 /**
@@ -959,6 +1017,12 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, seq, ticks) {
 
     try {
         var value = seq.getCurrentValue();
+
+        // Solo override: when the device's track is soloed, force the mute
+        // sequencer to play. The pitch sequencer is unaffected.
+        if (seqName === 'mute' && this._soloActive) {
+            value = 1;
+        }
 
         // Parameter-based paths don't need a clip — handle them before any
         // clip lookup IPC. On parameter_transpose / parameter_mute tracks

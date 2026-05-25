@@ -453,6 +453,15 @@ SequencerDevice.prototype.onTransportStop = function() {
 
     var hasTemperatureState = !!this.temperatureState[clipId];
 
+    // Disarm temperature BEFORE touching notes: tear down the observers and
+    // clear the active flag so any already-queued deferred onTemperatureNotes-
+    // Changed callback sees inactive state and bails, rather than racing the
+    // restore-write below (which sets expected = null) and triggering a spurious
+    // re-baseline. The base model stays in memory; we re-derive on next start.
+    this.clearTemperatureLoopJumpObserver();
+    this.clearTemperatureNotesObserver();
+    this.temperatureActive = false;
+
     // Undo transformations based on last values
     if (this.lastValues[clipId] || hasTemperatureState) {
         try {
@@ -540,13 +549,9 @@ SequencerDevice.prototype.onTransportStop = function() {
         }
     }
 
-    // Clear temperature observers (re-setup on next transport start if temp > 0).
-    // The base model stays in memory and is re-derived from on restart.
-    this.clearTemperatureLoopJumpObserver();
-    this.clearTemperatureNotesObserver();
-
-    // Clear active flag but keep temperatureValue and base model across cycles
-    this.temperatureActive = false;
+    // Temperature observers and the active flag were already disarmed above,
+    // before the notes block. temperatureValue and the base model persist across
+    // cycles and are re-derived from on the next transport start.
 
     // Cancel any pending batch applies
     for (var pendingClipId in this.pendingApplies) {

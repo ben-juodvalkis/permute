@@ -77,6 +77,31 @@ base before snapshotting, so the new base reflects the user's composition rather
 than our scramble. Notes the user added or repitched are kept as the new intent.
 A fresh variation is then applied so playback stays consistent.
 
+### Overdubs are never swapped until re-baselined
+
+`applyTemperatureVariation` swaps only notes present in the base model. An
+overdubbed note that is not yet folded in (its `notes` notification still
+pending) is excluded from the swap pool, so it always keeps its recorded pitch.
+Without this, a return-to-0 that lands *before* the notes observer fires would
+leave the overdub at a scrambled pitch — `restoreBaseModel` only restores
+base-model notes. Excluding non-base notes closes that window entirely.
+
+### Disarm before restore on transport stop
+
+On transport stop, the temperature observers are torn down and
+`temperatureActive` is cleared **before** the notes are read and the base model
+is written back. This guarantees any already-queued deferred
+`onTemperatureNotesChanged` callback sees inactive state and bails, rather than
+racing the restore write (which sets `expected = null`) and triggering a
+spurious re-baseline of the just-cleaned clip.
+
+### `captureBaseModel` self-enforces no-overwrite
+
+Capture returns early if a base model already exists for the clip, so the
+"never overwrite except via re-baseline" contract holds even if a future caller
+forgets to guard. Re-baseline assigns `temperatureState` directly and is the
+only path that replaces an existing base model.
+
 ## Consequences
 
 ### Positive
@@ -100,14 +125,19 @@ A fresh variation is then applied so playback stays consistent.
 ## Verification
 
 `get_all_notes_extended` / `apply_note_modifications` were exercised against a
-mock clip with the real `permute-temperature.js` and `permute-shuffle.js`:
+mock clip with the real `permute-temperature.js` and `permute-shuffle.js`. The
+notes notification is modelled as an async, manually-drained queue (matching
+Max's `defer`) so callback ordering can be controlled:
 
 - 200 loop jumps on one clip → return-to-0 lossless.
 - Transport stop writes original; stop/start cycles → return-to-0 lossless.
-- Overdub while hot → originals restored, overdub preserved.
+- Overdub while hot, observer drained → re-baselined, overdub preserved.
 - User repitches an existing note while hot → that note becomes new base,
   others restore.
 - Pitch sequencer on during temperature → return-to-0 keeps the octave shift.
+- **Race:** overdub → loop variation → return-to-0 *before* the notes observer
+  fires → overdub kept at its recorded pitch. Confirmed to fail with the
+  pre-fix full-array swap and pass with the base-note-only swap.
 
 ## Files
 

@@ -262,6 +262,14 @@ function applyTemperatureMethods(proto) {
      * @param {string} clipId
      */
     proto.captureBaseModel = function(clipId) {
+        // Self-enforce the no-overwrite contract. Re-baseline assigns
+        // temperatureState directly; capture must never clobber an existing
+        // base model, even if a future caller forgets to guard.
+        if (this.temperatureState[clipId]) {
+            debug("captureBaseModel", "Base model already exists for " + clipId + ", skipping");
+            return;
+        }
+
         var clip = this.getCurrentClip();
         if (!clip || clip.id !== clipId) {
             debug("captureBaseModel", "Clip unavailable or ID mismatch");
@@ -286,10 +294,13 @@ function applyTemperatureMethods(proto) {
     };
 
     /**
-     * Restore the base model verbatim (all fields), then clear temperature
-     * state. Notes the user added after capture are removed only if they were
-     * never folded in; in practice re-baseline keeps the model current, so the
-     * base model is authoritative and we restore exactly it.
+     * Restore base-model pitches to the clip (pitch only — the swap only ever
+     * changes pitch, so other fields are already at their base values), then
+     * clear temperature state. Notes known in the base model are set to
+     * base.pitch + current pitch-sequencer offset. Overdubbed notes not yet
+     * folded in via re-baseline are left at their current clip pitch (which,
+     * thanks to applyTemperatureVariation never swapping non-base notes, is the
+     * pitch the user recorded — not a scramble).
      *
      * @param {string} clipId
      */
@@ -364,31 +375,39 @@ function applyTemperatureMethods(proto) {
 
         var pitchAdjustment = this._getCurrentPitchOffset(clipId);
 
-        // 1. Reset every known note to its base pitch (+ current pitch shift).
-        //    This is what makes variation non-cumulative: we always start from
-        //    the base model, never from the previous scramble.
+        // 1. Reset every known note to its base pitch (+ current pitch shift),
+        //    and collect only base-model notes as the swap pool. Notes absent
+        //    from the base model are overdubs not yet re-baselined: we must
+        //    NEVER swap them, otherwise returning to 0 before the notes observer
+        //    fires would leave them at a scrambled pitch (restoreBaseModel only
+        //    restores base-model notes). Excluding them keeps their pitch stable
+        //    until a re-baseline folds them in.
+        var baseNotes = [];
         for (var i = 0; i < notes.notes.length; i++) {
             var note = notes.notes[i];
             var base = state.baseModel[note.note_id];
             if (base) {
                 note.pitch = base.pitch + pitchAdjustment;
+                baseNotes.push(note);
             }
         }
 
         // 2. Generate a new swap pattern from the (now base) pitches.
         this.temperatureSwapPattern = generateSwapPattern(
-            notes.notes,
+            baseNotes,
             this.temperatureValue
         );
 
-        // 3. Apply the swap.
-        applySwapPattern(notes.notes, this.temperatureSwapPattern);
+        // 3. Apply the swap to the base-note subset (references into notes.notes,
+        //    so the mutations propagate to the full array we write below).
+        applySwapPattern(baseNotes, this.temperatureSwapPattern);
 
         // 4. Record expected BEFORE writing. apply_note_modifications queues a
         //    "notes" notification synchronously; recording after the write would
         //    race that notification and our own write could be misread as a user
         //    edit. Setting expected first makes the diff correct regardless of
-        //    notification timing.
+        //    notification timing. Record over the full written set so overdub
+        //    pitches are part of `expected` and don't read as external changes.
         this._recordExpected(notes.notes, clipId);
 
         // 5. Write.
@@ -442,6 +461,10 @@ function applyTemperatureMethods(proto) {
         // new composition; we cannot un-swap notes we don't recognise, and
         // recognised notes that the user did NOT touch still hold our swap, so
         // we reverse our last swap on them before snapshotting.
+        // NOTE: _reverseExpectedSwap mutates only the in-memory notes array so
+        // the _buildBaseModel below captures the user's intended composition,
+        // not our scramble. It does NOT write to the clip; the write is done by
+        // applyTemperatureVariation at the end of this function.
         this._reverseExpectedSwap(notes.notes, state, pitchShift);
 
         this.temperatureState[clipId] = {

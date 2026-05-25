@@ -59,12 +59,20 @@ Tracks `lastValues` per clip, applies deltas only on change:
 - `TransposeStrategy` - Parameter-based pitch shifting
 - `ObserverRegistry` - Centralized Live API observer management
 
-### Temperature Transformation (v3.1)
+### Temperature Transformation (v3.3 — base model)
 
-Uses note ID tracking for reversible pitch swapping:
-- Captures original pitches by `note_id` when temp goes 0→>0
-- Restores original pitches when temp goes >0→0
-- Handles overdubbing (new notes preserved) and deletion gracefully
+The user's composition is the source of truth, held in an in-memory **base
+model** per clip; the scrambled clip is never read back as truth. Each variation
+is derived from the base model (`displayed = applySwap(baseModel, temp)`), so
+return-to-0 rewrites the base verbatim and is lossless by construction. See
+`docs/adr/015-temperature-base-model.md`.
+- Captures full base notes by `note_id` when temp goes 0→>0
+- Variations (enable, loop jump, post-edit) always derive from the base model
+- Return-to-0 rewrites the base model verbatim (+ current pitch-seq offset)
+- Transport stop writes the original back to the clip but keeps the base model
+  in memory; transport start re-derives (no re-capture from the live clip)
+- A `notes` observer + content diff distinguishes our own writes from user edits
+  (timing-independent); a user edit while hot re-baselines to the new notes
 
 ### Note Chance (v3.2)
 

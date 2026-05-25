@@ -1,6 +1,6 @@
 # ADR 106: Temperature Transformation for Organic Loop Variation
 
-> **HISTORICAL — pre-Permute Looping-repo ADR.** Preserved for archival context. Temperature still exists in Permute with the same algorithmic core, but the "two-phase layer system" and the "parameter 21" reference below pre-date the delta-based refactor and the UI-native revamp. For the current architecture see [../../CLAUDE.md](../../CLAUDE.md) and for the current parameter layout see [../api.md](../api.md).
+> **HISTORICAL — pre-Permute Looping-repo ADR.** Preserved for archival context. Temperature still exists in Permute with the same algorithmic core (group-based swap), but the "two-phase layer system" and the "parameter 21" reference below pre-date the delta-based refactor and the UI-native revamp. The state/reversibility mechanism described here (capture original pitches, reverse swaps to restore) has been **superseded by the base-model architecture** — see [../adr/015-temperature-base-model.md](../adr/015-temperature-base-model.md). For the current architecture see [../../CLAUDE.md](../../CLAUDE.md) and for the current parameter layout see [../api.md](../api.md).
 
 **Status:** Accepted (algorithm still in use; surrounding architecture superseded)
 **Date:** 2025-11-05

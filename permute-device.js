@@ -80,9 +80,17 @@ function SequencerDevice() {
     this.temperatureSwapPattern = [];
     this.temperatureActive = false;
     this.temperatureLoopJumpObserver = null;
+    this.temperatureNotesObserver = null;
 
-    // Temperature note ID tracking for reversible transformations
-    // Maps clipId -> { originalPitches: { noteId: pitch } }
+    // Temperature base model: the user's composition is the source of truth,
+    // never the scrambled clip. Maps clipId -> {
+    //   baseModel: { noteId: {pitch,start_time,duration,velocity,mute,
+    //                         probability,velocity_deviation,release_velocity} },
+    //   expected:  { noteId: pitch }   // pitches WE last wrote, for self-write diff
+    // }
+    // Variations are always derived from baseModel; return-to-0 rewrites it
+    // verbatim. A notes-changed that doesn't match `expected` means the user
+    // edited the clip -> re-baseline. See docs/adr/015-temperature-base-model.md.
     this.temperatureState = {};
 
     // Chance (note probability) state (non-sequenced)
@@ -388,17 +396,22 @@ SequencerDevice.prototype.onTransportStart = function() {
     this.invalidateClipCache();
     this.transportState.setPlaying(true);
 
-    // If temperature was set before transport started, capture state now
+    // If temperature is hot, derive a fresh variation from the base model.
+    // The base model is the source of truth and persists across transport
+    // cycles; we capture it only if it doesn't exist yet (never overwrite it
+    // from the live clip, which may already be scrambled).
     if (this.temperatureValue > 0) {
         var clip = this.getCurrentClip();
         if (clip) {
             var clipId = clip.id;
-            // Only capture if we don't already have state for this clip
+            this.temperatureActive = true;
             if (!this.temperatureState[clipId]) {
-                this.captureTemperatureState(clipId);
+                this.captureBaseModel(clipId);
             }
+            this.setupTemperatureLoopJumpObserver();
+            this.setupTemperatureNotesObserver();
+            this.applyTemperatureVariation(clipId);
         }
-        this.setupTemperatureLoopJumpObserver();
     }
 
     // Apply chance to clip if active
@@ -440,6 +453,15 @@ SequencerDevice.prototype.onTransportStop = function() {
 
     var hasTemperatureState = !!this.temperatureState[clipId];
 
+    // Disarm temperature BEFORE touching notes: tear down the observers and
+    // clear the active flag so any already-queued deferred onTemperatureNotes-
+    // Changed callback sees inactive state and bails, rather than racing the
+    // restore-write below (which sets expected = null) and triggering a spurious
+    // re-baseline. The base model stays in memory; we re-derive on next start.
+    this.clearTemperatureLoopJumpObserver();
+    this.clearTemperatureNotesObserver();
+    this.temperatureActive = false;
+
     // Undo transformations based on last values
     if (this.lastValues[clipId] || hasTemperatureState) {
         try {
@@ -450,21 +472,25 @@ SequencerDevice.prototype.onTransportStop = function() {
                     var changed = false;
 
                     if (hasTemperatureState) {
+                        // Write the base model (true original) back to the clip
+                        // so a saved set is clean, but KEEP the base model in
+                        // memory so the next transport start re-derives from it.
                         var tempState = this.temperatureState[clipId];
                         for (var i = 0; i < notes.notes.length; i++) {
                             var note = notes.notes[i];
-                            var originalPitch = tempState.originalPitches[note.note_id];
-                            if (originalPitch !== undefined) {
+                            var base = tempState.baseModel[note.note_id];
+                            if (base) {
                                 // Restore TRUE base pitch (no pitch sequencer adjustment)
-                                note.pitch = originalPitch;
+                                note.pitch = base.pitch;
                                 changed = true;
                             }
-                            // Overdubbed notes keep current pitch
+                            // Overdubbed notes not yet re-baselined keep current pitch
                         }
-                        debug("onTransportStop", "Restored temperature state for " + notes.notes.length + " notes");
-
-                        // Clear temperature state
-                        delete this.temperatureState[clipId];
+                        // We just wrote base pitches; the notes observer is torn
+                        // down below, but record expected defensively in case a
+                        // notification is already queued.
+                        tempState.expected = null;
+                        debug("onTransportStop", "Restored base model for " + notes.notes.length + " notes (kept in memory)");
                     } else {
                         // No temperature state - use delta-based pitch undo for note_transpose
                         if (this.lastValues[clipId] && this.lastValues[clipId].pitch === 1) {
@@ -523,11 +549,9 @@ SequencerDevice.prototype.onTransportStop = function() {
         }
     }
 
-    // Clear temperature observer (will be re-setup on next transport start if temp > 0)
-    this.clearTemperatureLoopJumpObserver();
-
-    // Clear active flag but keep temperatureValue across transport cycles
-    this.temperatureActive = false;
+    // Temperature observers and the active flag were already disarmed above,
+    // before the notes block. temperatureValue and the base model persist across
+    // cycles and are re-derived from on the next transport start.
 
     // Cancel any pending batch applies
     for (var pendingClipId in this.pendingApplies) {
@@ -953,13 +977,14 @@ SequencerDevice.prototype._refreshClipFromSlots = function() {
 
 /**
  * Update _cachedClip / _cachedClipId. On identity change, clear the
- * temperature loop_jump observer and update clipState — same cleanup the
- * old per-tick getCurrentClip used to do when clip.id changed.
+ * temperature observers (loop_jump + notes) and update clipState — same
+ * cleanup the old per-tick getCurrentClip used to do when clip.id changed.
  */
 SequencerDevice.prototype._setCachedClip = function(clip, clipPath) {
     var newId = clip ? clip.id : null;
     if (newId !== this._cachedClipId) {
         this.clearTemperatureLoopJumpObserver();
+        this.clearTemperatureNotesObserver();
         this.clipState.update(newId);
     }
     this._cachedClip = clip;
@@ -1127,29 +1152,31 @@ SequencerDevice.prototype.handleMaxUICommand = function(messageName, args) {
 };
 
 /**
- * Handle clip change event.
- * Cleans up temperature state for old clip, re-captures for new clip if active.
+ * Handle clip change event (the device's target clip changed).
+ * Re-points temperature observers at the new clip. Base models are keyed by
+ * clipId and kept, so returning to a previously-hot clip preserves its
+ * original; the new clip captures its own base model on first hot use.
  */
 SequencerDevice.prototype.onClipChanged = function() {
     this.invalidateClipCache();
-    var hasTemperatureState = false;
-    for (var k in this.temperatureState) {
-        if (this.temperatureState.hasOwnProperty(k)) {
-            hasTemperatureState = true;
-            break;
-        }
-    }
-    if (hasTemperatureState) {
-        this.temperatureState = {};
-        debug("onClipChanged", "Cleared temperature state for old clip");
-    }
 
-    // If temperature is active, capture state for the new clip
+    // Detach observers from the old clip path.
+    this.clearTemperatureLoopJumpObserver();
+    this.clearTemperatureNotesObserver();
+
+    // If temperature is active, set up the new clip: capture its base model if
+    // we don't have one for it yet (never overwrite an existing base model),
+    // re-point observers, and apply a fresh variation.
     if (this.temperatureValue > 0 && this.temperatureActive) {
         var clip = this.getCurrentClip();
         if (clip) {
-            this.captureTemperatureState(clip.id);
-            debug("onClipChanged", "Captured temperature state for new clip");
+            if (!this.temperatureState[clip.id]) {
+                this.captureBaseModel(clip.id);
+            }
+            this.setupTemperatureLoopJumpObserver();
+            this.setupTemperatureNotesObserver();
+            this.applyTemperatureVariation(clip.id);
+            debug("onClipChanged", "Re-pointed temperature to new clip");
         }
     }
 

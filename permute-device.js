@@ -914,6 +914,22 @@ SequencerDevice.prototype.scheduleDetectionRetries = function(attemptIndex) {
         if (transposeResult) {
             self.instrumentType = 'parameter_transpose';
             var cachedBaseline = self.transposeBaselines[self.instrumentDeviceId];
+            // Same as the synchronous path: if we've never seen this device,
+            // snapshot the param now (before any shift) so the strategy is born
+            // with a trustworthy baseline rather than lazily reading a possibly
+            // shifted/stale value later.
+            if (cachedBaseline === undefined) {
+                try {
+                    var bv = transposeResult.param.get("value");
+                    if (bv && bv[0] !== undefined) {
+                        cachedBaseline = bv[0];
+                        self.transposeBaselines[self.instrumentDeviceId] = cachedBaseline;
+                        debug("instrument", "Retry captured fresh baseline " + cachedBaseline + " for device " + self.instrumentDeviceId);
+                    }
+                } catch (e) {
+                    handleError("scheduleDetectionRetries:baseline", e, false);
+                }
+            }
             self.instrumentStrategy = new TransposeStrategy(
                 self.instrumentDevice,
                 transposeResult.param,

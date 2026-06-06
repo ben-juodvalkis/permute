@@ -96,6 +96,11 @@ function TransposeStrategy(device, transposeParam, shiftAmount, paramName, cache
     if (cachedBaseline !== undefined && cachedBaseline !== null) {
         this.originalTranspose = cachedBaseline;
     }
+    // Track whether we've ever actually shifted the param up. revertTranspose()
+    // is called unconditionally on transport stop and on `devices` observer
+    // fires; if we never shifted, there is nothing to revert and writing the
+    // param is always wrong (and can rail it to min/max via a bad baseline).
+    this.hasShifted = false;
     // Read param bounds once. Simpler Transpose is -48..+48; rack macros
     // are 0..127. Using the param's own bounds means the clamp is always
     // correct without a per-device branch.
@@ -123,6 +128,18 @@ TransposeStrategy.prototype.applyTranspose = function(shouldShiftUp) {
         return;
     }
 
+    // Asked to return to baseline but we never shifted up — there is nothing to
+    // restore, so writing the param is always wrong. This is the core fix for
+    // the intermittent "transpose snaps to a rail" bug: the per-tick pitch path
+    // calls applyTranspose(false) on the first tick after transport start (when
+    // lastParameterValue is undefined and the step value is 0), and the stop
+    // handler calls it again via revertTranspose — both touch the param even
+    // when no pitch step is active. Gate every down-write on a real prior shift.
+    if (!shouldShiftUp && !this.hasShifted) {
+        debug("transpose", "applyTranspose no-op: shift-down with nothing shifted");
+        return;
+    }
+
     try {
         // Check if transposeParam is still valid
         if (this.transposeParam.id === INVALID_LIVE_API_ID) {
@@ -133,13 +150,22 @@ TransposeStrategy.prototype.applyTranspose = function(shouldShiftUp) {
         // Only read param value once to capture the original — avoids IPC on subsequent calls
         if (this.originalTranspose === null) {
             var currentTranspose = this.transposeParam.get("value");
-            this.originalTranspose = currentTranspose ? currentTranspose[0] : DEFAULT_DRUM_RACK_TRANSPOSE;
+            // A falsy/empty read means a stale handle or device mid-rebuild —
+            // we have no trustworthy baseline. Bail without writing rather than
+            // falling back to a hardcoded value that rails params with a
+            // narrower range (e.g. Simpler Transpose -48..+48).
+            if (!currentTranspose || currentTranspose[0] === undefined) {
+                debug("transpose", "applyTranspose BAIL: no baseline and param read failed");
+                return;
+            }
+            this.originalTranspose = currentTranspose[0];
             debug("transpose", "captured originalTranspose=" + this.originalTranspose);
         }
 
         var newValue;
         if (shouldShiftUp) {
             newValue = this.originalTranspose + this.shiftAmount;
+            this.hasShifted = true;
         } else {
             newValue = this.originalTranspose;
         }
@@ -156,8 +182,16 @@ TransposeStrategy.prototype.applyTranspose = function(shouldShiftUp) {
 };
 
 TransposeStrategy.prototype.revertTranspose = function() {
-    debug("transpose", "revertTranspose called, originalTranspose=" + this.originalTranspose);
+    debug("transpose", "revertTranspose called, originalTranspose=" + this.originalTranspose + ", hasShifted=" + this.hasShifted);
+    // Nothing to revert if we never shifted up. Writing the param here is the
+    // root cause of the intermittent "transpose snaps to min" bug: stop/devices
+    // callbacks fire revert even when no pitch step was ever active.
+    if (!this.hasShifted) {
+        debug("transpose", "revertTranspose no-op: never shifted");
+        return;
+    }
     this.applyTranspose(false);
+    this.hasShifted = false;
     debug("transpose", "revertTranspose complete");
     // originalTranspose persists across transport cycles so applyTranspose()
     // uses the known-good baseline rather than re-reading the param (which

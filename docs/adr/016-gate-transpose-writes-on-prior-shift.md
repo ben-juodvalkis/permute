@@ -97,11 +97,12 @@ Supporting changes:
 - A genuine shift cycle is unchanged: step on → `applyTranspose(true)` (bypasses
   the gate, sets `hasShifted`), step off / stop → `applyTranspose(false)`
   reverts, then `hasShifted` clears.
-- The hardcoded `DEFAULT_DRUM_RACK_TRANSPOSE` fallback is no longer used for
-  writes; the constant remains defined but its only former consumer is gone.
+- The hardcoded `DEFAULT_DRUM_RACK_TRANSPOSE` fallback is gone; with no
+  remaining consumer, the constant has been removed from `permute-constants.js`.
 
 ## Files
 
 - `permute-instruments.js` — `hasShifted` field, the shift-down gate in
   `applyTranspose`, no-invented-baseline bail, `revertTranspose` early-out.
 - `permute-device.js` — `scheduleDetectionRetries` baseline capture.
+- `permute-constants.js` — removed the now-unused `DEFAULT_DRUM_RACK_TRANSPOSE`.

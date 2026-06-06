@@ -10,7 +10,6 @@ var utils = require('permute-utils');
 var INVALID_LIVE_API_ID = constants.INVALID_LIVE_API_ID;
 var MIDI_MIN = constants.MIDI_MIN;
 var MIDI_MAX = constants.MIDI_MAX;
-var DEFAULT_DRUM_RACK_TRANSPOSE = constants.DEFAULT_DRUM_RACK_TRANSPOSE;
 var debug = utils.debug;
 var handleError = utils.handleError;
 
@@ -165,7 +164,6 @@ TransposeStrategy.prototype.applyTranspose = function(shouldShiftUp) {
         var newValue;
         if (shouldShiftUp) {
             newValue = this.originalTranspose + this.shiftAmount;
-            this.hasShifted = true;
         } else {
             newValue = this.originalTranspose;
         }
@@ -173,6 +171,12 @@ TransposeStrategy.prototype.applyTranspose = function(shouldShiftUp) {
         newValue = Math.max(this.paramMin, Math.min(this.paramMax, newValue));
         debug("transpose", "setting param to " + newValue + " (original=" + this.originalTranspose + ", shift=" + this.shiftAmount + ", bounds=[" + this.paramMin + "," + this.paramMax + "])");
         this.transposeParam.set("value", newValue);
+        // Mark shifted only after the write succeeds, so the invariant
+        // "hasShifted iff the param was actually shifted" holds even if set()
+        // throws on an invalid handle.
+        if (shouldShiftUp) {
+            this.hasShifted = true;
+        }
 
         debug("transpose", "Applied " + (shouldShiftUp ? "+" : "") +
               this.shiftAmount + " via '" + this.paramName + "' param");

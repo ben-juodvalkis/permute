@@ -1,6 +1,6 @@
 # Permute — Communication Reference
 
-This file documents the messaging surface between the Max patcher and the v8 JS engine. See [ADR-010](adr/010-ui-native-revamp.md) for the design rationale (no OSC, no `request_ui_values`, live.* UI objects as the source of truth).
+This file documents the messaging surface between the Max patcher and the v8 JS engine. See [ADR-010](adr/010-ui-native-revamp.md) for the design rationale (no OSC, no `request_ui_values`, live.* UI objects as the source of truth) and [ADR-017](adr/017-osc-step-telemetry-broadcast.md) for the narrow, one-way outbound OSC exception described below.
 
 ## Inlets and outlets
 
@@ -10,9 +10,9 @@ The `v8 permute-device.js` object has:
 |------|-----------|---------|
 | Inlet 0 | UI → v8 | Transport (`song_time <ticks>`) |
 | Inlet 1 | UI → v8 | Max UI messages (step, length, rate, temperature, chance) |
-| Outlet 0 | v8 → UI | Current step position (`mute_current`, `pitch_current`) |
+| Outlet 0 | v8 → UI | Current step position (`mute_current`, `pitch_current`, `step_broadcast`) |
 
-There is no OSC I/O and no state broadcast. Persistence, automation, undo, and Push mapping are handled by Live directly on the `live.*` UI objects (`parameter_enable: 1`).
+There is no inbound OSC and no OSC command surface — persistence, automation, undo, and Push mapping are handled by Live directly on the `live.*` UI objects (`parameter_enable: 1`). The one exception is a narrow, one-way **outbound** OSC telemetry push (see below), added because Live doesn't fire LOM value-changed notifications for the "Visible (Not Stored)" current-step numboxes.
 
 ## Inlet 1 — Max UI messages
 
@@ -39,6 +39,27 @@ JS never echoes these values back. The `live.*` object already holds the value.
 | `pitch_current <step>` | int -1..7 | `live.numbox` (display) | On pitch sequencer step change and on transport stop (-1) |
 
 The display numboxes use Visibility "Visible (Not Stored)" on Live 12.3 beta (externally readable via Push/LiveAPI, excluded from automation and undo). On stable Live they fall back to "Hidden".
+
+## OSC step-broadcast telemetry (outbound only)
+
+On this Live install, LOM parameter-change listeners never fire for the "Visible (Not Stored)" `Mute Current` / `Pitch Current` params, so an external tool can't read step position via the LOM. `step_broadcast` is a one-way workaround: the same outlet-0 tick that emits `mute_current`/`pitch_current` also emits a third tag, which the patcher forwards out as a UDP OSC packet. See [ADR-017](adr/017-osc-step-telemetry-broadcast.md).
+
+Patcher chain (parallel to the on-device display chain, off the same `s ---fromjs` fan-out as `chance`/`temperature`/`*_step_N`):
+
+```
+v8 outlet 0 → s ---fromjs → r ---fromjs → route step_broadcast → prepend /looping/permute/step → udpsend 127.0.0.1 11020
+```
+
+| Field | Value |
+|-------|-------|
+| Transport | UDP, `127.0.0.1:11020` |
+| OSC address | `/looping/permute/step` |
+| Args | `kind` (string, `"mute"` or `"pitch"`), `step` (int, raw 0–7, no display `+1`), `trackIndex` (int), `deviceIndex` (int) |
+| Emitted | Once per actual step change per sequencer (mute/pitch independent) — same condition as `mute_current`/`pitch_current`, not every clock tick |
+
+`trackIndex`/`deviceIndex` are resolved fresh via `LiveAPI("this_device").path` on every call (not cached, so they survive track/device reorders) and are `-1` when unresolved — including for a device on a return or master track, where `trackIndex` intentionally reports `-1` rather than a return-track index. `deviceIndex` is this device's own index in its immediate container (its path's last `devices N` segment), correct even when nested in a rack chain.
+
+No inbound OSC is accepted — this is strictly device → listener, and does not reopen the OSC command surface removed in ADR-010.
 
 ## Rate enum
 

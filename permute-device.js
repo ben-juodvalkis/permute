@@ -1074,6 +1074,7 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, seq, ticks) {
                 seq.lastParameterValue = value;
             }
             outlet(0, seqName + "_current", newStep);
+            this._emitStepBroadcast(seqName, newStep);
             return;
         }
 
@@ -1083,6 +1084,7 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, seq, ticks) {
                 seq.lastParameterValue = value;
             }
             outlet(0, seqName + "_current", newStep);
+            this._emitStepBroadcast(seqName, newStep);
             return;
         }
 
@@ -1092,8 +1094,32 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, seq, ticks) {
         }
 
         outlet(0, seqName + "_current", newStep);
+        this._emitStepBroadcast(seqName, newStep);
     } catch (error) {
         handleError("processSequencerTick:" + seqName, error, false);
+    }
+};
+
+/**
+ * Push current-step telemetry out as a one-way OSC message (via the
+ * existing outlet-0 tag/route fan-out) so external tools that can't get
+ * LOM value-changed notifications for the "Visible (Not Stored)" numboxes
+ * can read step position anyway. Does not affect the mute_current/
+ * pitch_current display path above — strictly additive.
+ *
+ * @param {string} seqName - Sequencer name ('mute', 'pitch')
+ * @param {number} newStep - Raw internal step index (0-7)
+ */
+SequencerDevice.prototype._emitStepBroadcast = function(seqName, newStep) {
+    try {
+        var thisDevice = new LiveAPI("this_device");
+        var trackMatch = thisDevice.path.match(/tracks\s+(\d+)/);
+        var deviceMatch = thisDevice.path.match(/devices\s+(\d+)/);
+        outlet(0, "step_broadcast", seqName, newStep,
+            trackMatch ? parseInt(trackMatch[1], 10) : -1,
+            deviceMatch ? parseInt(deviceMatch[1], 10) : -1);
+    } catch (error) {
+        handleError("_emitStepBroadcast:" + seqName, error, false);
     }
 };
 

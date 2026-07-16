@@ -1113,8 +1113,14 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, seq, ticks) {
 SequencerDevice.prototype._emitStepBroadcast = function(seqName, newStep) {
     try {
         var thisDevice = new LiveAPI("this_device");
-        var trackMatch = thisDevice.path.match(/tracks\s+(\d+)/);
-        var deviceMatch = thisDevice.path.match(/devices\s+(\d+)/);
+        // \b excludes "return_tracks N" (word boundary fails between "_"
+        // and "tracks", both \w) so a return-track path falls through to -1
+        // instead of misreporting the return-track index as a track index.
+        var trackMatch = thisDevice.path.match(/\btracks\s+(\d+)/);
+        // Anchored to end of string: a device's own path always terminates
+        // in "devices N" for its own index, so this stays correct even when
+        // nested in a rack chain (path has an earlier ancestor "devices N").
+        var deviceMatch = thisDevice.path.match(/devices\s+(\d+)$/);
         outlet(0, "step_broadcast", seqName, newStep,
             trackMatch ? parseInt(trackMatch[1], 10) : -1,
             deviceMatch ? parseInt(deviceMatch[1], 10) : -1);

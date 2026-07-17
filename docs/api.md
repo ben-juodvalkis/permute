@@ -54,8 +54,8 @@ v8 outlet 0 → s ---fromjs → r ---fromjs → route step_broadcast → prepend
 |-------|-------|
 | Transport | UDP, `127.0.0.1:11020` |
 | OSC address | `/looping/permute/step` |
-| Args | `kind` (string, `"mute"` or `"pitch"`), `step` (int, raw 0–7, no display `+1`), `trackIndex` (int), `deviceIndex` (int) |
-| Emitted | Once per actual step change per sequencer (mute/pitch independent) — same condition as `mute_current`/`pitch_current`, not every clock tick |
+| Args | `kind` (string, `"mute"` or `"pitch"`), `step` (int, raw -1..7, no display `+1`; `-1` = idle/stopped), `trackIndex` (int), `deviceIndex` (int) |
+| Emitted | Once per actual step change per sequencer (mute/pitch independent), not every clock tick — **and once per sequencer with `step = -1` on transport stop**. Exactly the same emission points as `mute_current`/`pitch_current`, so the display chain and this wire can't drift apart. Without the stop emit a consumer freezes on the last step instead of clearing. |
 
 `trackIndex`/`deviceIndex` are resolved fresh via `LiveAPI("this_device").path` on every call (not cached, so they survive track/device reorders) and are `-1` when unresolved — including for a device on a return or master track, where `trackIndex` intentionally reports `-1` rather than a return-track index. `deviceIndex` is this device's own index in its immediate container (its path's last `devices N` segment), correct even when nested in a rack chain.
 

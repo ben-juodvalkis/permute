@@ -28,9 +28,18 @@ the frozen LOM read for these two values only.
 
 - **New outlet-0 tag**, alongside the existing `mute_current`/`pitch_current`:
   `outlet(0, "step_broadcast", seqName, newStep, trackIndex, deviceIndex)`,
-  emitted immediately after each existing `mute_current`/`pitch_current` call
-  in `processSequencerTick` — same only-on-step-change condition, no new
-  emission path.
+  emitted immediately after **every** existing `mute_current`/`pitch_current`
+  call — no new emission path, no new condition. That means the three
+  step-change sites in `processSequencerTick` *and* the two transport-stop
+  sites in `onTransportStop`, which emit the `-1` idle sentinel. All five
+  `<seq>_current` emits are paired 1:1, so the display chain and the OSC
+  wire cannot drift apart.
+
+  (Amended 2026-07-16, same day: the first implementation paired only the
+  three `processSequencerTick` sites, so the wire never announced idle and
+  consumers froze on the last step at transport stop instead of clearing.
+  The two `onTransportStop` sites were always in scope under this bullet's
+  own "each existing call" rule — they were simply missed.)
 - **New parallel patcher chain**, off the same `s ---fromjs` fan-out already
   used for `chance`/`temperature`/`*_step_N`:
   `r ---fromjs → route step_broadcast → prepend /looping/permute/step →

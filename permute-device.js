@@ -440,9 +440,11 @@ SequencerDevice.prototype.onTransportStop = function() {
         for (var name in this.sequencers) {
             if (this.sequencers.hasOwnProperty(name)) {
                 var seq = this.sequencers[name];
+                var seqName = name.replace('Sequencer', '');
                 seq.currentStep = -1;
                 seq.lastParameterValue = undefined;
-                outlet(0, name.replace('Sequencer', '') + "_current", -1);
+                outlet(0, seqName + "_current", -1);
+                this._emitStepBroadcast(seqName, -1);
             }
         }
         return;
@@ -543,9 +545,11 @@ SequencerDevice.prototype.onTransportStop = function() {
     for (var name in this.sequencers) {
         if (this.sequencers.hasOwnProperty(name)) {
             var seq = this.sequencers[name];
+            var seqName = name.replace('Sequencer', '');
             seq.currentStep = -1;
             seq.lastParameterValue = undefined;
-            outlet(0, name.replace('Sequencer', '') + "_current", -1);
+            outlet(0, seqName + "_current", -1);
+            this._emitStepBroadcast(seqName, -1);
         }
     }
 
@@ -1107,8 +1111,13 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, seq, ticks) {
  * can read step position anyway. Does not affect the mute_current/
  * pitch_current display path above — strictly additive.
  *
+ * Called from processSequencerTick on every step change, and from
+ * onTransportStop with -1 so consumers clear rather than freeze on the
+ * last step. Pair it with every `<seq>_current` outlet emit: the display
+ * chain and this wire must not drift out of sync.
+ *
  * @param {string} seqName - Sequencer name ('mute', 'pitch')
- * @param {number} newStep - Raw internal step index (0-7)
+ * @param {number} newStep - Raw internal step index (0-7), or -1 for idle
  */
 SequencerDevice.prototype._emitStepBroadcast = function(seqName, newStep) {
     try {

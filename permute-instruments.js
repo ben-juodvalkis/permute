@@ -12,6 +12,9 @@ var MIDI_MIN = constants.MIDI_MIN;
 var MIDI_MAX = constants.MIDI_MAX;
 var debug = utils.debug;
 var handleError = utils.handleError;
+var createLiveAPI = utils.createLiveAPI;
+var releaseLiveAPI = utils.releaseLiveAPI;
+var repointLiveAPI = utils.repointLiveAPI;
 
 // ===== INSTRUMENT DETECTOR HELPER =====
 
@@ -29,20 +32,32 @@ function InstrumentDetector() {}
 InstrumentDetector.findInstrumentDevice = function(track) {
     if (!track) return null;
 
+    // One scratch handle walks the device list and is released in the finally
+    // below; only the match is promoted to an owned handle. Constructing a
+    // handle per device orphaned every non-instrument device it walked past.
+    var scratch = null;
+
     try {
         var devices = track.get("devices");
         if (!devices || devices.length === 0) return null;
 
+        var basePath = track.path + " devices ";
         for (var i = 0; i < devices.length; i++) {
-            var devicePath = track.path + " devices " + i;
-            var device = new LiveAPI(devicePath);
+            scratch = repointLiveAPI(scratch, basePath + i);
 
-            if (!device || device.id === INVALID_LIVE_API_ID) continue;
+            if (!scratch || scratch.id === INVALID_LIVE_API_ID) continue;
 
-            var deviceType = device.get("type");
+            var deviceType = scratch.get("type");
             var isInstrument = (deviceType && (deviceType[0] === "instrument" || deviceType[0] === 1));
 
             if (isInstrument) {
+                // Owned by the caller (SequencerDevice.instrumentDevice and the
+                // strategies); released via _releaseInstrumentHandles.
+                var device = createLiveAPI(basePath + i);
+                if (!device || device.id === INVALID_LIVE_API_ID) {
+                    releaseLiveAPI(device);
+                    return null;
+                }
                 return {
                     device: device,
                     deviceId: device.id
@@ -51,6 +66,8 @@ InstrumentDetector.findInstrumentDevice = function(track) {
         }
     } catch (error) {
         handleError("InstrumentDetector.findInstrumentDevice", error, false);
+    } finally {
+        scratch = releaseLiveAPI(scratch);
     }
 
     return null;
@@ -72,6 +89,16 @@ InstrumentStrategy.prototype.applyTranspose = function(value) {
 
 InstrumentStrategy.prototype.revertTranspose = function() {
     // Override in subclasses
+};
+
+/**
+ * Release every LiveAPI handle this strategy owns.
+ * Strategies are replaced wholesale on re-detection; without this, the
+ * outgoing strategy's device/param handles become unreachable with their
+ * path listeners still registered. Idempotent and safe on null handles.
+ */
+InstrumentStrategy.prototype.release = function() {
+    this.device = releaseLiveAPI(this.device);
 };
 
 /**
@@ -202,15 +229,25 @@ TransposeStrategy.prototype.revertTranspose = function() {
     // may still hold a shifted value if the revert hasn't propagated yet).
 };
 
+TransposeStrategy.prototype.release = function() {
+    this.transposeParam = releaseLiveAPI(this.transposeParam);
+    InstrumentStrategy.prototype.release.call(this);
+};
+
 /**
  * MuteStrategy - Parameter-based mute via a rack macro.
  * Writes one of two values (muted / playing) to a device parameter.
  *
- * Holds the device path + param index rather than a cached LiveAPI handle.
- * The handle is re-resolved on each write because rack mutations (chain
+ * Holds the device path + param index rather than a resolved-once LiveAPI
+ * handle. The path is re-resolved on each write because rack mutations (chain
  * changes, device add/remove) can invalidate cached parameter handles, and
  * dereferencing a stale handle from the audio thread crashes Live's
  * parameter cache (EXC_BAD_ACCESS at 0x58 on com.apple.audio.IOThread).
+ *
+ * The re-resolve re-points ONE owned handle rather than constructing a new
+ * one. Semantics are identical — assigning `path` resolves afresh — but the
+ * old form orphaned an attached handle on every mute flip, i.e. at sequencer
+ * rate, which is the fastest way there is to hand V8's GC a live grenade.
  *
  * @param {LiveAPI} device - Device containing the mute parameter
  * @param {number} paramIndex - Index of the mute parameter on the device
@@ -223,6 +260,7 @@ function MuteStrategy(device, paramIndex, mutedValue, playingValue) {
     this.paramIndex = paramIndex;
     this.mutedValue = mutedValue;
     this.playingValue = playingValue;
+    this._paramHandle = null;  // owned; re-pointed per write, released in release()
 }
 MuteStrategy.prototype = Object.create(InstrumentStrategy.prototype);
 MuteStrategy.prototype.constructor = MuteStrategy;
@@ -230,7 +268,11 @@ MuteStrategy.prototype.constructor = MuteStrategy;
 MuteStrategy.prototype.applyMute = function(shouldMute) {
     if (!this.devicePath) return;
     try {
-        var paramApi = new LiveAPI(this.devicePath + " parameters " + this.paramIndex);
+        this._paramHandle = repointLiveAPI(
+            this._paramHandle,
+            this.devicePath + " parameters " + this.paramIndex
+        );
+        var paramApi = this._paramHandle;
         if (!paramApi || paramApi.id === INVALID_LIVE_API_ID) return;
         var newValue = shouldMute ? this.mutedValue : this.playingValue;
         paramApi.set("value", newValue);
@@ -238,6 +280,11 @@ MuteStrategy.prototype.applyMute = function(shouldMute) {
     } catch (error) {
         handleError("MuteStrategy.applyMute", error, false);
     }
+};
+
+MuteStrategy.prototype.release = function() {
+    this._paramHandle = releaseLiveAPI(this._paramHandle);
+    InstrumentStrategy.prototype.release.call(this);
 };
 
 MuteStrategy.prototype.revertMute = function() {

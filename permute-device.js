@@ -36,6 +36,10 @@ var isParameterTransposeDevice = utils.isParameterTransposeDevice;
 var getDeviceParameter = utils.getDeviceParameter;
 var createObserver = utils.createObserver;
 var defer = utils.defer;
+var createLiveAPI = utils.createLiveAPI;
+var releaseLiveAPI = utils.releaseLiveAPI;
+var repointLiveAPI = utils.repointLiveAPI;
+var releaseAllLiveAPI = utils.releaseAllLiveAPI;
 
 var TrackState = stateClasses.TrackState;
 var ClipState = stateClasses.ClipState;
@@ -112,11 +116,21 @@ function SequencerDevice() {
 
     // Clip cache, kept fresh by playing_slot_index / fired_slot_index
     // observers. Reads on the per-tick path are pure cache hits.
+    //
+    // _clipHandle is ONE long-lived owned handle re-pointed as the target clip
+    // changes; _cachedClip is either that same object or null when no clip is
+    // playing. Constructing a fresh handle per clip launch was the device's
+    // highest-frequency source of dropped-but-attached handles — the churn
+    // path that eventually coincided with a scavenge and aborted Live.
+    this._clipHandle = null;
     this._cachedClip = null;
     this._cachedClipId = null;
     this._cachedClipPath = null;
     this._playingSlotIndex = -1;
     this._firedSlotIndex = -1;
+
+    // Long-lived handle for "this_device", re-pointed per step broadcast.
+    this._deviceHandle = null;
 
     // Time signature tracking
     this.timeSignatureNumerator = 4; // Default to 4/4
@@ -138,15 +152,24 @@ function SequencerDevice() {
 SequencerDevice.prototype.init = function() {
     debug("init", "Starting sequencer initialization");
     try {
-        var thisDevice = new LiveAPI("this_device");
+        // A re-init (script reload, re-instantiation) must not strand the
+        // previous run's handles with their path listeners still registered.
+        // No-op on a first init.
+        this.releaseAllHandles();
 
-        var track = new LiveAPI("this_device canonical_parent");
+        // Owned for the device's lifetime; re-pointed in _emitStepBroadcast.
+        this._deviceHandle = createLiveAPI("this_device");
+        var thisDevice = this._deviceHandle;
+
+        var track = createLiveAPI("this_device canonical_parent");
 
         if (!track || track.id === INVALID_LIVE_API_ID) {
             if (thisDevice && thisDevice.id !== INVALID_LIVE_API_ID) {
                 var devicePath = thisDevice.path;
                 var trackPath = devicePath.substring(0, devicePath.lastIndexOf(" devices"));
-                track = new LiveAPI(trackPath);
+                // Re-point the handle we already own rather than dropping it
+                // and constructing a second one.
+                track = repointLiveAPI(track, trackPath);
             }
         }
 
@@ -173,6 +196,61 @@ SequencerDevice.prototype.init = function() {
     }
 };
 
+// ===== HANDLE LIFETIME =====
+
+/**
+ * Release the LiveAPI handles held for the current instrument — the device
+ * handle and whatever the strategies own (transpose param, mute param).
+ *
+ * The strategy OBJECTS are deliberately left in place: callers on the per-tick
+ * path (applyTranspose / applyMute) already bail when their handle is missing,
+ * so nulling the handles reproduces exactly the behavior the `devices`
+ * observer had when it nulled transposeParam by hand. Only the attachment to
+ * Live goes away — which is the whole point, since a nulled-but-undetached
+ * handle is precisely what the GC later aborts Live over.
+ */
+SequencerDevice.prototype._releaseInstrumentHandles = function() {
+    if (this.instrumentStrategy && typeof this.instrumentStrategy.release === 'function') {
+        try { this.instrumentStrategy.release(); } catch (e) {}
+    }
+    if (this.muteStrategy && typeof this.muteStrategy.release === 'function') {
+        try { this.muteStrategy.release(); } catch (e) {}
+    }
+    // Both strategies may hold the same object as instrumentDevice; releasing
+    // an already-released handle is a no-op.
+    this.instrumentDevice = releaseLiveAPI(this.instrumentDevice);
+    this.instrumentDeviceId = null;
+};
+
+/**
+ * Complete teardown: detach every LiveAPI handle this device owns, observers
+ * included, and drop the cached references. Called from notifydeleted (a
+ * device removed from a track must leave no listeners behind) and at the top
+ * of init (so a reload doesn't strand the previous run's handles).
+ *
+ * The final pool drain is the backstop: even a handle some future code path
+ * forgot to release is hard-detached here rather than reaching the GC.
+ */
+SequencerDevice.prototype.releaseAllHandles = function() {
+    try { this.observerRegistry.clearAll(); } catch (e) {}
+    try { this._releaseInstrumentHandles(); } catch (e) {}
+
+    this.temperatureLoopJumpObserver = null;
+    this.temperatureNotesObserver = null;
+
+    this._clipHandle = releaseLiveAPI(this._clipHandle);
+    this._cachedClip = null;
+    this._cachedClipId = null;
+    this._cachedClipPath = null;
+
+    this._deviceHandle = releaseLiveAPI(this._deviceHandle);
+
+    this.trackState.ref = releaseLiveAPI(this.trackState.ref);
+    this.trackState.reset();
+
+    releaseAllLiveAPI();
+};
+
 // ===== OBSERVER SETUP =====
 
 /**
@@ -196,14 +274,12 @@ SequencerDevice.prototype.setupDeviceObserver = function() {
                 typeof self.instrumentStrategy.revertTranspose === 'function') {
                 try { self.instrumentStrategy.revertTranspose(); } catch (e) {}
             }
-            // Synchronously null the stale instrument refs before returning
-            // to Live's dispatcher. Coalesce burst into a single detection
-            // after the tree settles.
-            self.instrumentDevice = null;
-            self.instrumentDeviceId = null;
-            if (self.instrumentStrategy && self.instrumentStrategy.transposeParam) {
-                self.instrumentStrategy.transposeParam = null;
-            }
+            // Synchronously detach AND null the stale instrument handles
+            // before returning to Live's dispatcher. Nulling alone (what this
+            // used to do) leaves an attached handle unreachable, which is the
+            // exact condition that aborts Live when a scavenge collects it.
+            // Coalesce burst into a single detection after the tree settles.
+            self._releaseInstrumentHandles();
             self._scheduleDetection();
         }
     );
@@ -787,6 +863,11 @@ var DETECT_RETRY_DELAYS_MS = [50, 200, 500, 1200];
  * macro list is still being populated.
  */
 SequencerDevice.prototype.detectInstrumentType = function() {
+    // Release the outgoing instrument's handles before the strategies below
+    // are replaced wholesale — otherwise the old device/param handles become
+    // unreachable with their Live path listeners still registered.
+    this._releaseInstrumentHandles();
+
     // Reset to defaults
     this.instrumentType = 'unknown';
     this.instrumentDevice = null;
@@ -917,6 +998,14 @@ SequencerDevice.prototype.scheduleDetectionRetries = function(attemptIndex) {
         var transposeResult = findTransposeParameterByName(self.instrumentDevice);
         if (transposeResult) {
             self.instrumentType = 'parameter_transpose';
+            // Release the outgoing strategy's own param handle before it is
+            // replaced below. instrumentDevice is deliberately NOT released
+            // here — the incoming strategy takes over that same handle.
+            if (self.instrumentStrategy && self.instrumentStrategy.transposeParam &&
+                self.instrumentStrategy.transposeParam !== transposeResult.param) {
+                self.instrumentStrategy.transposeParam =
+                    releaseLiveAPI(self.instrumentStrategy.transposeParam);
+            }
             var cachedBaseline = self.transposeBaselines[self.instrumentDeviceId];
             // Same as the synchronous path: if we've never seen this device,
             // snapshot the param now (before any shift) so the strategy is born
@@ -983,7 +1072,13 @@ SequencerDevice.prototype._refreshClipFromSlots = function() {
         return;
     }
     try {
-        var clip = new LiveAPI(clipPath);
+        // Re-point the one long-lived clip handle instead of constructing a
+        // new one per launch. Assigning `path` re-resolves exactly as the old
+        // per-launch constructor call did, but the previous target's handle is
+        // no longer dropped undetached — in steady state this creates no
+        // orphans at all, rather than cleaning up after them.
+        this._clipHandle = repointLiveAPI(this._clipHandle, clipPath);
+        var clip = this._clipHandle;
         if (clip && clip.id !== INVALID_LIVE_API_ID) {
             this._setCachedClip(clip, clipPath);
         } else {
@@ -1002,6 +1097,9 @@ SequencerDevice.prototype._refreshClipFromSlots = function() {
  */
 SequencerDevice.prototype._setCachedClip = function(clip, clipPath) {
     var newId = clip ? clip.id : null;
+    // Identity semantics are unchanged by the re-pointing: a re-point to the
+    // same path short-circuits in _refreshClipFromSlots before reaching here,
+    // so this still fires exactly when the underlying clip actually changes.
     if (newId !== this._cachedClipId) {
         this.clearTemperatureLoopJumpObserver();
         this.clearTemperatureNotesObserver();
@@ -1010,6 +1108,13 @@ SequencerDevice.prototype._setCachedClip = function(clip, clipPath) {
     this._cachedClip = clip;
     this._cachedClipId = newId;
     this._cachedClipPath = clipPath || null;
+
+    // No clip: park the owned handle on an empty path so it isn't left
+    // listening to a slot we no longer track. The object stays owned and
+    // pooled, ready to be re-pointed on the next resolve.
+    if (!clip && this._clipHandle) {
+        try { this._clipHandle.path = ""; } catch (e) {}
+    }
 };
 
 /**
@@ -1121,7 +1226,14 @@ SequencerDevice.prototype.processSequencerTick = function(seqName, seq, ticks) {
  */
 SequencerDevice.prototype._emitStepBroadcast = function(seqName, newStep) {
     try {
-        var thisDevice = new LiveAPI("this_device");
+        // Re-point the device's own long-lived handle rather than constructing
+        // one per step. Assigning "this_device" re-resolves exactly as the old
+        // constructor call did, so a track reorder is still reflected
+        // immediately — but this used to orphan two attached handles on every
+        // step change of every sequencer, by far the fastest orphan source in
+        // the device.
+        this._deviceHandle = repointLiveAPI(this._deviceHandle, "this_device");
+        var thisDevice = this._deviceHandle;
         // \b excludes "return_tracks N" (word boundary fails between "_"
         // and "tracks", both \w) so a return-track path falls through to -1
         // instead of misreporting the return-track index as a track index.
@@ -1291,6 +1403,10 @@ function notifydeleted() {
         try { sequencer._pendingDetectionTask.cancel(); } catch (e) {}
         sequencer._pendingDetectionTask = null;
     }
-    // Use observer registry for cleanup (includes temperature loop_jump observer)
-    sequencer.observerRegistry.clearAll();
+    // Detach every LiveAPI handle this device owns — observers, clip handle,
+    // this_device handle, track ref, instrument device and strategy params —
+    // and drain the pool as a backstop. A device removed from a track must
+    // not leave listeners behind, and nothing may reach V8's GC still
+    // attached to Live.
+    sequencer.releaseAllHandles();
 }

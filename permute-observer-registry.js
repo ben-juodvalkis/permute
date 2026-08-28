@@ -1,8 +1,17 @@
 /**
  * permute-observer-registry.js - Centralized observer management
  *
- * No dependencies.
+ * Observers are ordinary LiveAPI handles: they are created through
+ * permute-utils' factory (createObserver), tracked in the same device-scoped
+ * pool as every other handle, and released through the same releaseLiveAPI
+ * chokepoint. There is one lifetime system, not two.
+ *
+ * Depends on: permute-utils
  */
+
+var utils = require('permute-utils');
+
+var releaseLiveAPI = utils.releaseLiveAPI;
 
 /**
  * ObserverRegistry - Centralized observer management.
@@ -25,25 +34,15 @@ ObserverRegistry.prototype.register = function(name, observer) {
 };
 
 /**
- * Fully detach a LiveAPI observer from Live's dispatcher.
- * Setting property alone only stops future notifications — path/id must also
- * be cleared so queued notifications against a stale path cannot fire
- * SendMessage errors into _path_listener_callback.
- */
-function hardDetach(obs) {
-    if (!obs) return;
-    try { obs.property = ""; } catch (e) {}
-    try { obs.path = ""; } catch (e) {}
-    try { obs.id = 0; } catch (e) {}
-}
-
-/**
- * Unregister an observer by name.
+ * Unregister an observer by name. Releases the handle (hard-detach + drop
+ * from the pool) rather than leaving it for the garbage collector — a
+ * dropped-but-attached observer is what aborts Live from a GC weak callback.
+ *
  * @param {string} name - Observer name
  */
 ObserverRegistry.prototype.unregister = function(name) {
     if (this.observers[name]) {
-        hardDetach(this.observers[name]);
+        releaseLiveAPI(this.observers[name]);
         this.observers[name] = null;
         delete this.observers[name];
     }
@@ -55,7 +54,7 @@ ObserverRegistry.prototype.unregister = function(name) {
 ObserverRegistry.prototype.clearAll = function() {
     for (var name in this.observers) {
         if (this.observers.hasOwnProperty(name)) {
-            hardDetach(this.observers[name]);
+            releaseLiveAPI(this.observers[name]);
             this.observers[name] = null;
         }
     }

@@ -25,6 +25,41 @@ Permute is a Max4Live device that provides mute sequencing, pitch sequencing, an
 | `docs/api.md` | **Complete communication reference** — inlets, outlets, rate enum |
 | `docs/adr/` | Architecture decision records |
 
+## HARD RULE: LiveAPI handle ownership
+
+> A `LiveAPI` object must never become garbage while it still holds a Live path
+> listener. Every handle is either **owned and reachable**, or **explicitly
+> detached** — never merely dropped.
+
+**Every `LiveAPI` registers a path listener with Live, whether or not you passed
+it an observer callback.** If V8 collects such an object, its finalizer sends a
+detach into Live; Live answers synchronously by dispatching a notification back,
+which tries to call JS from inside a GC weak callback. That is illegal — V8 hits
+`V8_Fatal` and **aborts the entire Live process**. It is intermittent: it needs a
+scavenge to land on a dropped handle, which can take an hour of playing.
+
+**No bare `new LiveAPI(...)` outside `permute-utils.js`.** Check it:
+
+```bash
+grep -n "new LiveAPI" *.js | grep -v permute-utils.js
+```
+
+Any hit is a defect. Use the chokepoint in `permute-utils.js` instead:
+
+| Need | Use |
+|------|-----|
+| A handle for a stable role, queried repeatedly | `repointLiveAPI(this._h, path)` — re-point, never re-construct |
+| A genuine one-shot lookup | `withLiveAPI(path, fn)` — detaches in a `finally` |
+| A new owned handle | `createLiveAPI(path)` |
+| An observer | `createObserver(path, property, cb)` |
+| Done with a handle | `this._h = releaseLiveAPI(this._h)` — safe on null, safe twice |
+| Teardown | `SequencerDevice.releaseAllHandles()` (from `notifydeleted`) |
+
+Detach only handles genuinely being released — over-eager detaching silently
+breaks observation, which is worse than the crash because it fails quietly.
+`liveAPIPoolSize()` is the diagnostic: a count that climbs while playing means
+something is creating handles per tick. See `docs/adr/018-liveapi-handle-ownership.md`.
+
 ## Communication Architecture
 
 See `docs/api.md` for the complete reference. Summary:
@@ -107,6 +142,7 @@ var DEBUG_MODE = true;
 |-------------|--------|
 | Messaging change | `docs/api.md` |
 | Architecture change | Create new ADR in `docs/adr/` |
+| New `LiveAPI` creation site | Stop — see the hard rule above |
 
 ## Instrument Detection
 

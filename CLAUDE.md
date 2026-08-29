@@ -44,20 +44,28 @@ scavenge to land on a dropped handle, which can take an hour of playing.
 grep -n "new LiveAPI" *.js | grep -v permute-utils.js
 ```
 
-Any hit is a defect. Use the chokepoint in `permute-utils.js` instead:
+Any hit is a defect. Every handle comes from the device's `HandlePool`
+(`this.handles` on `SequencerDevice`; anything else that makes handles is
+passed the pool):
 
 | Need | Use |
 |------|-----|
-| A handle for a stable role, queried repeatedly | `repointLiveAPI(this._h, path)` — re-point, never re-construct |
-| A genuine one-shot lookup | `withLiveAPI(path, fn)` — detaches in a `finally` |
-| A new owned handle | `createLiveAPI(path)` |
-| An observer | `createObserver(path, property, cb)` |
-| Done with a handle | `this._h = releaseLiveAPI(this._h)` — safe on null, safe twice |
+| A handle for a stable role, queried repeatedly | `this.handles.repoint(this._h, path)` — re-point, never re-construct |
+| A genuine one-shot lookup | `this.handles.borrow(path, fn)` — detaches in a `finally` |
+| A new owned handle | `this.handles.create(path)` |
+| An observer | `this.handles.observer(path, property, cb)` |
+| Done with a handle | `this._h = this.handles.release(this._h)` — safe on null, safe twice |
 | Teardown | `SequencerDevice.releaseAllHandles()` (from `notifydeleted`) |
+
+**The pool is per-device, never module state.** Permute is routinely loaded
+several times in one set, and a module-level pool would let one device's
+teardown drain detach the others' observers — they would keep sequencing while
+silently deaf to slot and transport changes. If you add a class that creates
+handles, take the pool as a constructor argument; don't reach for a global.
 
 Detach only handles genuinely being released — over-eager detaching silently
 breaks observation, which is worse than the crash because it fails quietly.
-`liveAPIPoolSize()` is the diagnostic: a count that climbs while playing means
+`this.handles.size()` is the diagnostic: a count that climbs while playing means
 something is creating handles per tick. See `docs/adr/018-liveapi-handle-ownership.md`.
 
 ## Communication Architecture
@@ -153,3 +161,16 @@ Scans for transpose parameters by name (case-insensitive):
 4. "octave" (shift: 16)
 
 If found, uses parameter-based shifting. Otherwise, modifies note pitches directly.
+
+### Pitch baseline (v3.4)
+
+The "home" value the pitch sequencer shifts away from is **reconciled on every
+write, not snapshotted**. `TransposeStrategy.reconcileBaseline()` reads the live
+param immediately before each write and folds any user edit into the baseline —
+so setting the knob and *then* enabling pitch steps shifts from the new value,
+and nudging the knob mid-sequence moves home by the same delta. Audio clips do
+the same with `pitch_coarse` (relative, never a flat 12/0).
+
+There is deliberately **no observer on the transpose param** — nothing acts on a
+new baseline until the next write, so a listener inside the instrument's subtree
+would buy no behavior for real risk. See `docs/adr/013` and `docs/adr/019`.

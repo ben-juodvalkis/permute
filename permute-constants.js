@@ -56,6 +56,10 @@ var MAX_PATTERN_LENGTH = 64;
 var MIN_PATTERN_LENGTH = 1;
 var DEFAULT_GAIN_VALUE = 1.0;
 var MUTED_GAIN = 0.0;
+// Clip.pitch_coarse is semitones, -48..+48. The pitch sequencer shifts
+// relative to whatever the user dialed in, so the sum needs clamping.
+var PITCH_COARSE_MIN = -48;
+var PITCH_COARSE_MAX = 48;
 var INVALID_LIVE_API_ID = "0";
 var TASK_SCHEDULE_DELAY = 1;
 
@@ -110,6 +114,8 @@ module.exports = {
     MIN_PATTERN_LENGTH: MIN_PATTERN_LENGTH,
     DEFAULT_GAIN_VALUE: DEFAULT_GAIN_VALUE,
     MUTED_GAIN: MUTED_GAIN,
+    PITCH_COARSE_MIN: PITCH_COARSE_MIN,
+    PITCH_COARSE_MAX: PITCH_COARSE_MAX,
     INVALID_LIVE_API_ID: INVALID_LIVE_API_ID,
     TASK_SCHEDULE_DELAY: TASK_SCHEDULE_DELAY,
     VALUE_TYPES: VALUE_TYPES,

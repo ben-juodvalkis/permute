@@ -1,24 +1,25 @@
 /**
  * permute-observer-registry.js - Centralized observer management
  *
- * Observers are ordinary LiveAPI handles: they are created through
- * permute-utils' factory (createObserver), tracked in the same device-scoped
- * pool as every other handle, and released through the same releaseLiveAPI
- * chokepoint. There is one lifetime system, not two.
+ * Observers are ordinary LiveAPI handles: they are created through the owning
+ * device's HandlePool, tracked in the same device-scoped
+ * pool as every other handle, and released through that pool. There is one
+ * lifetime system, not two.
  *
- * Depends on: permute-utils
+ * No dependencies — the pool is injected by the owning device.
  */
-
-var utils = require('permute-utils');
-
-var releaseLiveAPI = utils.releaseLiveAPI;
 
 /**
  * ObserverRegistry - Centralized observer management.
  * Tracks all active observers and guarantees cleanup on error/destruction.
+ *
+ * @param {HandlePool} pool - The owning device's handle pool. Observers are
+ *   released back through it, so registry teardown can only ever affect the
+ *   device that owns this registry.
  */
-function ObserverRegistry() {
+function ObserverRegistry(pool) {
     this.observers = {}; // name -> observer
+    this.pool = pool || null;
 }
 
 /**
@@ -42,7 +43,7 @@ ObserverRegistry.prototype.register = function(name, observer) {
  */
 ObserverRegistry.prototype.unregister = function(name) {
     if (this.observers[name]) {
-        releaseLiveAPI(this.observers[name]);
+        if (this.pool) this.pool.release(this.observers[name]);
         this.observers[name] = null;
         delete this.observers[name];
     }
@@ -54,7 +55,7 @@ ObserverRegistry.prototype.unregister = function(name) {
 ObserverRegistry.prototype.clearAll = function() {
     for (var name in this.observers) {
         if (this.observers.hasOwnProperty(name)) {
-            releaseLiveAPI(this.observers[name]);
+            if (this.pool) this.pool.release(this.observers[name]);
             this.observers[name] = null;
         }
     }

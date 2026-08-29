@@ -76,7 +76,7 @@ function parseNotesResponse(notesJson) {
 // INVARIANT
 //   A LiveAPI object must never become garbage while it still holds a Live
 //   path listener. Every handle Permute creates is either owned and reachable
-//   (in _handlePool), or explicitly released — never merely dropped.
+//   (held by a HandlePool), or explicitly released — never merely dropped.
 //
 // WHY
 //   Every LiveAPI object registers a path listener with Live, whether or not
@@ -94,23 +94,17 @@ function parseNotesResponse(notesJson) {
 //   No bare `new LiveAPI(...)` anywhere outside this file. Check with:
 //     grep -n "new LiveAPI" *.js | grep -v permute-utils.js
 //   Any hit is a defect. See docs/adr/018-liveapi-handle-ownership.md.
-
-var _handlePool = [];
-
-function _poolAdd(obj) {
-    if (obj) _handlePool.push(obj);
-    return obj;
-}
-
-function _poolRemove(obj) {
-    for (var i = 0; i < _handlePool.length; i++) {
-        if (_handlePool[i] === obj) {
-            _handlePool.splice(i, 1);
-            return true;
-        }
-    }
-    return false;
-}
+//
+// SCOPE
+//   The pool is an INSTANCE, owned by the SequencerDevice and threaded to
+//   everything that makes handles — deliberately not module-level state.
+//   Permute is routinely loaded several times in one set (the crashing set had
+//   three), and whether Max gives each `v8` object its own required-module
+//   instance is not something to bet observation correctness on. With a
+//   module-level pool, one device's teardown drain would hard-detach the other
+//   devices' observers if that assumption were ever false: they would keep
+//   sequencing while silently deaf to slot/transport changes. An instance pool
+//   makes that structurally impossible instead of merely unlikely.
 
 /**
  * Fully detach a LiveAPI object from Live's dispatcher.
@@ -133,32 +127,75 @@ function hardDetach(obj) {
 }
 
 /**
- * Create an owned, pooled LiveAPI handle for a path.
- * The caller owns it and must eventually pass it to releaseLiveAPI (or leave
- * it to the teardown drain). Until then the pool holds a strong reference, so
- * the GC can never see it attached.
+ * HandlePool - owns every LiveAPI handle one device creates.
+ *
+ * One pool per SequencerDevice, threaded to everything that makes handles.
+ * The pool holds a strong reference to each live handle, so the GC only ever
+ * sees objects that have already been made inert by hardDetach.
+ */
+function HandlePool() {
+    this._handles = [];
+}
+
+HandlePool.prototype._add = function(obj) {
+    if (obj) this._handles.push(obj);
+    return obj;
+};
+
+HandlePool.prototype._remove = function(obj) {
+    for (var i = 0; i < this._handles.length; i++) {
+        if (this._handles[i] === obj) {
+            this._handles.splice(i, 1);
+            return true;
+        }
+    }
+    return false;
+};
+
+/**
+ * Create an owned handle for a path. The caller owns it and must eventually
+ * pass it to release() (or leave it to the teardown drain).
  *
  * @param {string} path - LiveAPI path
  * @returns {LiveAPI}
  */
-function createLiveAPI(path) {
-    return _poolAdd(new LiveAPI(path));
-}
+HandlePool.prototype.create = function(path) {
+    return this._add(new LiveAPI(path));
+};
+
+/**
+ * Create an owned, configured observer. An observer that is dropped without
+ * being unregistered is exactly as dangerous as a plain handle, so it is
+ * pooled like one; ObserverRegistry.unregister releases it through release().
+ *
+ * @param {string} path - LiveAPI path to observe
+ * @param {string} property - Property to observe
+ * @param {Function} callback - Callback to run on property change
+ * @returns {LiveAPI}
+ */
+HandlePool.prototype.observer = function(path, property, callback) {
+    // Pool before assigning path/property so a throwing assignment still
+    // leaves the handle owned rather than orphaned.
+    var observer = this._add(new LiveAPI(callback));
+    observer.path = path;
+    observer.property = property;
+    return observer;
+};
 
 /**
  * Release a handle: hard-detach it and drop it from the pool.
  * Safe on null, safe to call twice, safe on an already-invalid handle.
- * Returns null so callers can write `this.x = releaseLiveAPI(this.x);`.
+ * Returns null so callers can write `this.x = pool.release(this.x);`.
  *
  * @param {LiveAPI|null} obj
  * @returns {null}
  */
-function releaseLiveAPI(obj) {
+HandlePool.prototype.release = function(obj) {
     if (!obj) return null;
-    _poolRemove(obj);
+    this._remove(obj);
     hardDetach(obj);
     return null;
-}
+};
 
 /**
  * Re-point an existing owned handle at a new path instead of constructing a
@@ -173,58 +210,67 @@ function releaseLiveAPI(obj) {
  * @param {string} path - New path
  * @returns {LiveAPI|null}
  */
-function repointLiveAPI(obj, path) {
+HandlePool.prototype.repoint = function(obj, path) {
     if (!obj) {
         try {
-            return createLiveAPI(path);
+            return this.create(path);
         } catch (error) {
-            handleError("repointLiveAPI:create", error, false);
+            handleError("HandlePool.repoint:create", error, false);
             return null;
         }
     }
     try {
         obj.path = path;
     } catch (error) {
-        handleError("repointLiveAPI", error, false);
+        // Fail SAFE, not open. A handle whose re-point threw is still resolved
+        // to its PREVIOUS target, and every caller validates with
+        // `id !== INVALID_LIVE_API_ID` — which a stale-but-valid id passes. The
+        // caller would then silently operate on the wrong object: writing mutes
+        // and temperature to the clip that stopped playing, setting the mute
+        // macro on a replaced rack, or recording the wrong parameter index
+        // mid-scan. Make it inert so those guards reject it, matching the
+        // fail-safe behavior of the construct-a-new-handle form this replaced.
+        hardDetach(obj);
+        handleError("HandlePool.repoint", error, false);
     }
     return obj;
-}
+};
 
 /**
  * Borrow a transient handle for the duration of fn, then release it — even if
  * fn throws. Use this for genuine one-shot lookups so a transient handle can
  * never escape to the GC. Anything queried repeatedly in a stable role should
- * use repointLiveAPI on a long-lived handle instead.
+ * use repoint() on a long-lived handle instead.
  *
  * @param {string} path - LiveAPI path
  * @param {Function} fn - Receives the handle; its return value is passed through
  * @returns {*}
  */
-function withLiveAPI(path, fn) {
+HandlePool.prototype.borrow = function(path, fn) {
     var obj = null;
     try {
-        obj = createLiveAPI(path);
+        obj = this.create(path);
         return fn(obj);
     } finally {
-        releaseLiveAPI(obj);
+        this.release(obj);
     }
-}
+};
 
 /**
- * Drain the pool: hard-detach every handle Permute still owns.
+ * Drain the pool: hard-detach every handle this device still owns.
  * Called on device teardown so a device removed from a track leaves no
  * listeners behind, and on re-init so a script reload doesn't strand the
- * previous run's handles.
+ * previous run's handles. Only ever touches this device's handles.
  */
-function releaseAllLiveAPI() {
-    var pool = _handlePool;
-    _handlePool = [];
-    for (var i = 0; i < pool.length; i++) {
-        hardDetach(pool[i]);
-        pool[i] = null;
+HandlePool.prototype.releaseAll = function() {
+    var handles = this._handles;
+    this._handles = [];
+    for (var i = 0; i < handles.length; i++) {
+        hardDetach(handles[i]);
+        handles[i] = null;
     }
-    debug("liveapi", "Released " + pool.length + " pooled handles");
-}
+    debug("liveapi", "Released " + handles.length + " pooled handles");
+};
 
 /**
  * Number of handles currently owned. Diagnostic only — a steady-state count
@@ -232,22 +278,9 @@ function releaseAllLiveAPI() {
  *
  * @returns {number}
  */
-function liveAPIPoolSize() {
-    return _handlePool.length;
-}
-
-/**
- * Get an owned LiveAPI handle for a device parameter.
- * The caller owns the returned handle and must release it.
- *
- * @param {LiveAPI} device - Device LiveAPI object
- * @param {number} paramIndex - Parameter index
- * @returns {LiveAPI} - Parameter LiveAPI object
- */
-function getDeviceParameter(device, paramIndex) {
-    var paramPath = device.path + " parameters " + paramIndex;
-    return createLiveAPI(paramPath);
-}
+HandlePool.prototype.size = function() {
+    return this._handles.length;
+};
 
 /**
  * Find transpose parameter by scanning device parameters for known names.
@@ -256,10 +289,12 @@ function getDeviceParameter(device, paramIndex) {
  * Called once per device load, not per-step.
  *
  * @param {LiveAPI} device - Device to scan
+ * @param {HandlePool} pool - Pool that owns the scratch and result handles
  * @returns {Object|null} - { index, param, shiftAmount, name } or null if not found
  */
-function findTransposeParameterByName(device) {
+function findTransposeParameterByName(device, pool) {
     if (!device || device.id === INVALID_LIVE_API_ID) return null;
+    if (!pool) return null;
 
     // One scratch handle is re-pointed across the whole scan and released in
     // the finally below. Constructing a handle per parameter (as this used to)
@@ -301,7 +336,7 @@ function findTransposeParameterByName(device) {
         var macro2Name = null;
         var basePath = device.path + " parameters ";
         for (var i = 0; i < paramCount; i++) {
-            scratch = repointLiveAPI(scratch, basePath + i);
+            scratch = pool.repoint(scratch, basePath + i);
 
             // Validate LiveAPI object before use
             if (!scratch || scratch.id === INVALID_LIVE_API_ID) continue;
@@ -333,7 +368,7 @@ function findTransposeParameterByName(device) {
                     index: matches[name],
                     // Owned by the caller (TransposeStrategy), released via
                     // TransposeStrategy.release().
-                    param: createLiveAPI(basePath + matches[name]),
+                    param: pool.create(basePath + matches[name]),
                     shiftAmount: shiftAmount,
                     name: name
                 };
@@ -345,7 +380,7 @@ function findTransposeParameterByName(device) {
         handleError("findTransposeParameterByName", error, false);
         return null;
     } finally {
-        scratch = releaseLiveAPI(scratch);
+        scratch = pool.release(scratch);
     }
 }
 
@@ -371,28 +406,6 @@ function isParameterTransposeDevice(device) {
         handleError("isParameterTransposeDevice", error, false);
         return false;
     }
-}
-
-/**
- * Create and configure a LiveAPI observer.
- * Centralizes the observer creation pattern used throughout the device.
- *
- * The observer is pooled like any other handle — an observer that is dropped
- * without being unregistered is exactly as dangerous as a plain handle.
- * ObserverRegistry.unregister releases it through releaseLiveAPI.
- *
- * @param {string} path - LiveAPI path to observe
- * @param {string} property - Property to observe
- * @param {Function} callback - Callback function to execute on property change
- * @returns {LiveAPI} - Configured LiveAPI observer
- */
-function createObserver(path, property, callback) {
-    // Pool before assigning path/property so a throwing assignment still
-    // leaves the handle owned rather than orphaned.
-    var observer = _poolAdd(new LiveAPI(callback));
-    observer.path = path;
-    observer.property = property;
-    return observer;
 }
 
 /**
@@ -426,17 +439,13 @@ module.exports = {
     handleError: handleError,
     parseNotesResponse: parseNotesResponse,
     // LiveAPI handle lifetime — the single chokepoint. See the invariant above.
+    // HandlePool is the ONLY way to make a handle: there is no module-level
+    // factory, so a caller cannot accidentally create one outside a device's
+    // ownership.
+    HandlePool: HandlePool,
     hardDetach: hardDetach,
-    createLiveAPI: createLiveAPI,
-    releaseLiveAPI: releaseLiveAPI,
-    repointLiveAPI: repointLiveAPI,
-    withLiveAPI: withLiveAPI,
-    releaseAllLiveAPI: releaseAllLiveAPI,
-    liveAPIPoolSize: liveAPIPoolSize,
-    getDeviceParameter: getDeviceParameter,
     findTransposeParameterByName: findTransposeParameterByName,
     isParameterTransposeDevice: isParameterTransposeDevice,
-    createObserver: createObserver,
     defer: defer,
     setDebugMode: setDebugMode
 };

@@ -24,7 +24,6 @@ var OCTAVE_SEMITONES = constants.OCTAVE_SEMITONES;
 var debug = utils.debug;
 var handleError = utils.handleError;
 var parseNotesResponse = utils.parseNotesResponse;
-var createObserver = utils.createObserver;
 var defer = utils.defer;
 var generateSwapPattern = shuffle.generateSwapPattern;
 var applySwapPattern = shuffle.applySwapPattern;
@@ -71,7 +70,7 @@ function applyTemperatureMethods(proto) {
 
         var self = this;
 
-        this.temperatureLoopJumpObserver = createObserver(
+        this.temperatureLoopJumpObserver = this.handles.observer(
             clip.path,
             "loop_jump",
             function(args) {
@@ -103,7 +102,7 @@ function applyTemperatureMethods(proto) {
 
         var self = this;
 
-        this.temperatureNotesObserver = createObserver(
+        this.temperatureNotesObserver = this.handles.observer(
             clip.path,
             "notes",
             function(args) {

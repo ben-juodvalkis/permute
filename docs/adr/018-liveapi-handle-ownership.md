@@ -105,24 +105,46 @@ auditing for them.
 
 ### The ownership model
 
-**1. Single chokepoint.** All creation and release lives in `permute-utils.js`.
-No bare `new LiveAPI(...)` anywhere else.
+**1. Single chokepoint.** All creation and release lives in `permute-utils.js`,
+behind a `HandlePool`. No bare `new LiveAPI(...)` anywhere else.
 
-| Function | Role |
-|----------|------|
-| `createLiveAPI(path)` | Create an owned, pooled handle |
-| `createObserver(path, property, cb)` | Create an owned, pooled observer |
-| `releaseLiveAPI(obj)` | Hard-detach + drop from pool; returns `null` |
-| `repointLiveAPI(obj, path)` | Re-point an owned handle (creates on first use) |
-| `withLiveAPI(path, fn)` | Scoped borrow; releases in a `finally` |
-| `releaseAllLiveAPI()` | Drain the pool (teardown backstop) |
-| `liveAPIPoolSize()` | Diagnostic: a count that climbs while playing means a per-tick creator |
+| Method | Role |
+|--------|------|
+| `pool.create(path)` | Create an owned, pooled handle |
+| `pool.observer(path, property, cb)` | Create an owned, pooled observer |
+| `pool.release(obj)` | Hard-detach + drop from pool; returns `null` |
+| `pool.repoint(obj, path)` | Re-point an owned handle (creates on first use) |
+| `pool.borrow(path, fn)` | Scoped borrow; releases in a `finally` |
+| `pool.releaseAll()` | Drain this device's pool (teardown backstop) |
+| `pool.size()` | Diagnostic: a count that climbs while playing means a per-tick creator |
 | `hardDetach(obj)` | The shared primitive (`property=""`, `path=""`, `id=0`) |
 
-Every handle is tracked in a device-scoped pool, so the pool holds a strong
-reference and the GC only ever sees objects that are already inert.
-`releaseLiveAPI` is safe on `null`, safe to call twice, and safe on an
-already-invalid handle — each step of `hardDetach` is individually guarded.
+The pool holds a strong reference to every live handle, so the GC only ever
+sees objects that are already inert. `release` is safe on `null`, safe to call
+twice, and safe on an already-invalid handle — each step of `hardDetach` is
+individually guarded.
+
+**The pool is an instance, owned by the `SequencerDevice`,** and threaded to
+everything that makes handles (`ObserverRegistry`, the strategies, the two
+detection scans). It is deliberately not module-level state. Permute is
+routinely loaded several times in one set — the crashing set had three — and
+whether Max gives each `v8` object its own required-module instance is not
+something to bet observation correctness on. With a module-level pool, one
+device's teardown drain would hard-detach the other devices' observers if that
+assumption were ever false: they would keep sequencing off `song_time` while
+silently deaf to slot and transport changes, writing to a frozen clip. That is
+the "fails quietly" outcome this ADR is otherwise trying to avoid, so the pool
+is scoped to make it structurally impossible rather than merely unlikely.
+
+**`repoint` fails safe, not open.** If the `path` assignment throws, the handle
+is still resolved to its *previous* target, and every caller validates with
+`id !== INVALID_LIVE_API_ID` — which a stale-but-valid id passes. `repoint`
+therefore calls `hardDetach` on a failed re-point so the handle reads as
+invalid and the existing guards reject it, matching the fail-safe behavior of
+the construct-a-new-handle form it replaced. Without this, a failed re-point
+would silently write mutes and temperature to the clip that stopped playing,
+set the mute macro on a replaced rack, or record the wrong parameter index
+mid-scan.
 
 **2. Re-point, don't churn.** Anything queried repeatedly in a stable role
 keeps one long-lived handle and reassigns its `path`:
@@ -146,7 +168,7 @@ clip actually changes — not on every re-point. When there is no clip,
 `_cachedClip` is `null` as before and the owned handle is parked on an empty
 path.
 
-**3. Borrow for genuine one-shots.** `withLiveAPI(path, fn)` detaches in a
+**3. Borrow for genuine one-shots.** `pool.borrow(path, fn)` detaches in a
 `finally`, so a transient handle cannot escape even if the body throws. After
 the re-pointing work there are no remaining one-shot sites in the device; it is
 provided and tested as the sanctioned pattern for future ones.
@@ -159,9 +181,10 @@ and at the top of `init` (so a script reload does not strand the previous run's
 handles).
 
 **5. One lifetime system, not two.** `ObserverRegistry` no longer owns a
-private `hardDetach`. Its handles come from the same factory and are released
-through the same `releaseLiveAPI` chokepoint; `hardDetach` is now the shared
-primitive in `permute-utils.js`.
+private `hardDetach`. It is constructed with the owning device's pool, its
+observers come from `pool.observer()`, and it releases them through
+`pool.release()`; `hardDetach` is now the shared primitive in
+`permute-utils.js`.
 
 ### Enforcement
 
@@ -184,6 +207,11 @@ Any hit is a defect. A rule nobody can check is a rule that decays.
 | Handles per instrument re-detection | 22.00 | 4.00 (all released; attached count flat) |
 | **Attached handles after teardown** | **1826** | **0** |
 
+Two further properties are covered by the harness: a `repoint` whose `path`
+assignment throws leaves the handle reading invalid (`id` 0) rather than
+resolved to its previous target, and draining one device's pool leaves a second
+device's handles attached and owned.
+
 In steady state the device now creates **zero** handles: 200 clip launches plus
 2000 transport ticks constructed nothing at all and left the pool size flat.
 
@@ -204,7 +232,7 @@ musically and strictly safer.
 
 The fix rests on `LiveAPI`'s `path` property being writable and re-resolving
 the handle — standard, documented Max behavior, and already relied upon by
-`hardDetach` (`path = ""`) and `createObserver`. The verification harness stubs
+`hardDetach` (`path = ""`) and observer setup. The verification harness stubs
 `LiveAPI`, so this specific semantic is assumed rather than measured.
 
 ### Testing note

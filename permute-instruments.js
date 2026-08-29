@@ -12,9 +12,11 @@ var MIDI_MIN = constants.MIDI_MIN;
 var MIDI_MAX = constants.MIDI_MAX;
 var debug = utils.debug;
 var handleError = utils.handleError;
-var createLiveAPI = utils.createLiveAPI;
-var releaseLiveAPI = utils.releaseLiveAPI;
-var repointLiveAPI = utils.repointLiveAPI;
+
+// Tolerance for "is this reported value the one we just wrote?". Live echoes a
+// value-changed notification for our own parameter writes; anything within this
+// distance of our last write is ours, anything further is the user's hand.
+var PARAM_WRITE_EPSILON = 1e-3;
 
 // ===== INSTRUMENT DETECTOR HELPER =====
 
@@ -27,10 +29,11 @@ function InstrumentDetector() {}
  * Find the first instrument device on a track.
  *
  * @param {LiveAPI} track - Track to analyze
+ * @param {HandlePool} pool - Pool that owns the scratch and result handles
  * @returns {Object|null} - { device, deviceId } or null
  */
-InstrumentDetector.findInstrumentDevice = function(track) {
-    if (!track) return null;
+InstrumentDetector.findInstrumentDevice = function(track, pool) {
+    if (!track || !pool) return null;
 
     // One scratch handle walks the device list and is released in the finally
     // below; only the match is promoted to an owned handle. Constructing a
@@ -43,7 +46,7 @@ InstrumentDetector.findInstrumentDevice = function(track) {
 
         var basePath = track.path + " devices ";
         for (var i = 0; i < devices.length; i++) {
-            scratch = repointLiveAPI(scratch, basePath + i);
+            scratch = pool.repoint(scratch, basePath + i);
 
             if (!scratch || scratch.id === INVALID_LIVE_API_ID) continue;
 
@@ -53,9 +56,9 @@ InstrumentDetector.findInstrumentDevice = function(track) {
             if (isInstrument) {
                 // Owned by the caller (SequencerDevice.instrumentDevice and the
                 // strategies); released via _releaseInstrumentHandles.
-                var device = createLiveAPI(basePath + i);
+                var device = pool.create(basePath + i);
                 if (!device || device.id === INVALID_LIVE_API_ID) {
-                    releaseLiveAPI(device);
+                    pool.release(device);
                     return null;
                 }
                 return {
@@ -67,7 +70,7 @@ InstrumentDetector.findInstrumentDevice = function(track) {
     } catch (error) {
         handleError("InstrumentDetector.findInstrumentDevice", error, false);
     } finally {
-        scratch = releaseLiveAPI(scratch);
+        scratch = pool.release(scratch);
     }
 
     return null;
@@ -78,8 +81,9 @@ InstrumentDetector.findInstrumentDevice = function(track) {
 /**
  * InstrumentStrategy - Base class for instrument-specific pitch handling.
  */
-function InstrumentStrategy(device) {
+function InstrumentStrategy(device, pool) {
     this.device = device;
+    this.pool = pool || null;
     this.originalTranspose = null;
 }
 
@@ -98,7 +102,8 @@ InstrumentStrategy.prototype.revertTranspose = function() {
  * path listeners still registered. Idempotent and safe on null handles.
  */
 InstrumentStrategy.prototype.release = function() {
-    this.device = releaseLiveAPI(this.device);
+    if (this.pool) this.pool.release(this.device);
+    this.device = null;
 };
 
 /**
@@ -113,9 +118,10 @@ InstrumentStrategy.prototype.release = function() {
  *   provided, the strategy uses it instead of reading the live param value.
  *   Used when a strategy is rebuilt (e.g. after track devices change) while
  *   the param may still hold a shifted value from the prior strategy.
+ * @param {HandlePool} pool - Pool owning device/transposeParam
  */
-function TransposeStrategy(device, transposeParam, shiftAmount, paramName, cachedBaseline) {
-    InstrumentStrategy.call(this, device);
+function TransposeStrategy(device, transposeParam, shiftAmount, paramName, cachedBaseline, pool) {
+    InstrumentStrategy.call(this, device, pool);
     this.transposeParam = transposeParam;
     this.shiftAmount = shiftAmount;
     this.paramName = paramName;
@@ -127,6 +133,23 @@ function TransposeStrategy(device, transposeParam, shiftAmount, paramName, cache
     // fires; if we never shifted, there is nothing to revert and writing the
     // param is always wrong (and can rail it to min/max via a bad baseline).
     this.hasShifted = false;
+    // The value the param should currently hold because we put it there, or
+    // null if we have never written. Two jobs: it lets reconcileBaseline() tell
+    // an unchanged param apart from a user knob move, and it makes the
+    // re-baseline delta-based, which stays correct even when a shifted write
+    // was clamped at a param rail.
+    //
+    // Seeded from cachedBaseline on a rebuilt strategy: the outgoing strategy
+    // was reverted before this one was built, so the baseline is also what the
+    // param should read right now.
+    this._lastWritten = (this.originalTranspose === null) ? null : this.originalTranspose;
+    // Guards the one reconcile where the param may still be showing the
+    // OUTGOING strategy's shift because Live hasn't propagated its revert yet.
+    // See reconcileBaseline. ADR-014.
+    this._firstReconcile = true;
+    // Set by the device: called with the new baseline whenever this strategy
+    // adopts one, so the device-level baseline cache follows along.
+    this.onBaselineChanged = null;
     // Read param bounds once. Simpler Transpose is -48..+48; rack macros
     // are 0..127. Using the param's own bounds means the clamp is always
     // correct without a per-device branch.
@@ -173,7 +196,27 @@ TransposeStrategy.prototype.applyTranspose = function(shouldShiftUp) {
             return;
         }
 
-        // Only read param value once to capture the original — avoids IPC on subsequent calls
+        // Read what is ACTUALLY on the param before writing over it, and fold
+        // any user edit into the baseline. This is the whole fix for "the knob
+        // I set gets thrown away": the baseline captured at instrument
+        // detection goes stale the moment the user touches the knob, and
+        // shifting from a stale baseline discards their edit on the first step.
+        //
+        // Deliberately a read-before-write and NOT a `value` observer on the
+        // param. An observer would notice the edit sooner, but nothing acts on
+        // a new baseline until the next write anyway, so it would buy no
+        // behavior — while binding a listener inside the instrument's subtree,
+        // which is the exact shape ADR-013 removed after it flooded Live with
+        // `_path_listener_callback` errors during rack loads.
+        //
+        // Costs one get() per pitch on/off transition (not per tick — the
+        // caller only reaches here when the step value actually changes).
+        var liveValue = this.transposeParam.get("value");
+        if (liveValue && liveValue[0] !== undefined) {
+            this.reconcileBaseline(liveValue[0]);
+        }
+
+        // Fallback if the read above failed: capture once, avoiding IPC later
         if (this.originalTranspose === null) {
             var currentTranspose = this.transposeParam.get("value");
             // A falsy/empty read means a stale handle or device mid-rebuild —
@@ -197,7 +240,19 @@ TransposeStrategy.prototype.applyTranspose = function(shouldShiftUp) {
 
         newValue = Math.max(this.paramMin, Math.min(this.paramMax, newValue));
         debug("transpose", "setting param to " + newValue + " (original=" + this.originalTranspose + ", shift=" + this.shiftAmount + ", bounds=[" + this.paramMin + "," + this.paramMax + "])");
-        this.transposeParam.set("value", newValue);
+        // Record the write BEFORE issuing it: Live may dispatch the resulting
+        // value-changed notification synchronously, and a value observer that
+        // fires before _lastWritten is updated would read our own write as a
+        // user edit and re-baseline to the shifted value. Roll back on throw so
+        // "_lastWritten is what is actually on the param" always holds.
+        var previousWritten = this._lastWritten;
+        this._lastWritten = newValue;
+        try {
+            this.transposeParam.set("value", newValue);
+        } catch (writeError) {
+            this._lastWritten = previousWritten;
+            throw writeError;
+        }
         // Mark shifted only after the write succeeds, so the invariant
         // "hasShifted iff the param was actually shifted" holds even if set()
         // throws on an invalid handle.
@@ -229,8 +284,83 @@ TransposeStrategy.prototype.revertTranspose = function() {
     // may still hold a shifted value if the revert hasn't propagated yet).
 };
 
+/**
+ * Fold the param's actual current value into the baseline, telling our own
+ * last write (ignored) apart from a user knob move, automation, or undo
+ * (adopted as the new home position).
+ *
+ * Called from applyTranspose immediately before it writes, so the write always
+ * proceeds from what the user last left on the knob. Pure JS bookkeeping — no
+ * Live API calls.
+ *
+ * @param {number} value - The value currently on the param
+ */
+TransposeStrategy.prototype.reconcileBaseline = function(value) {
+    if (typeof value !== 'number' || !isFinite(value)) return;
+
+    var wasFirst = this._firstReconcile;
+    this._firstReconcile = false;
+
+    // Unchanged since our own last write — nobody has touched it.
+    if (this._lastWritten !== null &&
+        Math.abs(value - this._lastWritten) <= PARAM_WRITE_EPSILON) {
+        return;
+    }
+
+    // ADR-014's race, in the one window where it can still bite. A strategy
+    // rebuilt by the `devices` observer is born unshifted, with _lastWritten
+    // seeded to the baseline the outgoing strategy was just reverted to. If
+    // Live hasn't propagated that revert yet, the param still reads exactly
+    // baseline + shiftAmount — OUR value, not the user's. Adopting it would
+    // make the next shift compound (+12 becomes +24), which is the bug ADR-014
+    // exists to prevent. Ignore it and write the baseline, which re-issues the
+    // revert as a side effect. Only the FIRST reconcile of a strategy can be
+    // stale this way, so the guard costs nothing after that; the price is that
+    // a user who parks the knob at exactly one shift above the baseline before
+    // the first step-on has that particular edit ignored.
+    if (wasFirst && !this.hasShifted && this._lastWritten !== null &&
+        Math.abs(value - (this._lastWritten + this.shiftAmount)) <= PARAM_WRITE_EPSILON) {
+        debug("transpose", "ignoring un-propagated revert: param still reads " + value);
+        return;
+    }
+
+    if (this.hasShifted && this._lastWritten !== null) {
+        // The user moved the knob while we were holding it shifted, so they are
+        // adjusting what they hear right now. The same delta moves the home
+        // position, which keeps the sequencer's shift a constant offset from
+        // wherever the user puts the knob. Using the delta rather than
+        // (value - shiftAmount) stays correct if our shifted write was clamped.
+        this.originalTranspose = Math.max(this.paramMin, Math.min(this.paramMax,
+            this.originalTranspose + (value - this._lastWritten)));
+        debug("transpose", "external edit while shifted -> baseline " + this.originalTranspose);
+    } else {
+        // Not shifted: the param IS the home position, whatever it now reads.
+        this.originalTranspose = value;
+        debug("transpose", "external edit while unshifted -> baseline " + value);
+    }
+
+    this._lastWritten = value;
+    this._notifyBaselineChanged();
+};
+
+/**
+ * Tell the device a new baseline was adopted, so its per-device baseline cache
+ * doesn't re-seed a rebuilt strategy with the stale value.
+ */
+TransposeStrategy.prototype._notifyBaselineChanged = function() {
+    if (typeof this.onBaselineChanged === 'function') {
+        try {
+            this.onBaselineChanged(this.originalTranspose);
+        } catch (e) {
+            handleError("TransposeStrategy._notifyBaselineChanged", e, false);
+        }
+    }
+};
+
 TransposeStrategy.prototype.release = function() {
-    this.transposeParam = releaseLiveAPI(this.transposeParam);
+    this.onBaselineChanged = null;
+    if (this.pool) this.pool.release(this.transposeParam);
+    this.transposeParam = null;
     InstrumentStrategy.prototype.release.call(this);
 };
 
@@ -253,9 +383,10 @@ TransposeStrategy.prototype.release = function() {
  * @param {number} paramIndex - Index of the mute parameter on the device
  * @param {number} mutedValue - Value to write when muting
  * @param {number} playingValue - Value to write when unmuting
+ * @param {HandlePool} pool - Pool owning the re-pointed parameter handle
  */
-function MuteStrategy(device, paramIndex, mutedValue, playingValue) {
-    InstrumentStrategy.call(this, device);
+function MuteStrategy(device, paramIndex, mutedValue, playingValue, pool) {
+    InstrumentStrategy.call(this, device, pool);
     this.devicePath = device ? device.path : null;
     this.paramIndex = paramIndex;
     this.mutedValue = mutedValue;
@@ -268,7 +399,8 @@ MuteStrategy.prototype.constructor = MuteStrategy;
 MuteStrategy.prototype.applyMute = function(shouldMute) {
     if (!this.devicePath) return;
     try {
-        this._paramHandle = repointLiveAPI(
+        if (!this.pool) return;
+        this._paramHandle = this.pool.repoint(
             this._paramHandle,
             this.devicePath + " parameters " + this.paramIndex
         );
@@ -283,7 +415,8 @@ MuteStrategy.prototype.applyMute = function(shouldMute) {
 };
 
 MuteStrategy.prototype.release = function() {
-    this._paramHandle = releaseLiveAPI(this._paramHandle);
+    if (this.pool) this.pool.release(this._paramHandle);
+    this._paramHandle = null;
     InstrumentStrategy.prototype.release.call(this);
 };
 
@@ -295,7 +428,7 @@ MuteStrategy.prototype.revertMute = function() {
  * DefaultInstrumentStrategy - Default (no device-based transpose or mute).
  */
 function DefaultInstrumentStrategy() {
-    InstrumentStrategy.call(this, null);
+    InstrumentStrategy.call(this, null, null);
 }
 DefaultInstrumentStrategy.prototype = Object.create(InstrumentStrategy.prototype);
 DefaultInstrumentStrategy.prototype.constructor = DefaultInstrumentStrategy;

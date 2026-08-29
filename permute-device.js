@@ -24,6 +24,8 @@ var chance = require('permute-chance');
 var OCTAVE_SEMITONES = constants.OCTAVE_SEMITONES;
 var DEFAULT_GAIN_VALUE = constants.DEFAULT_GAIN_VALUE;
 var MUTED_GAIN = constants.MUTED_GAIN;
+var PITCH_COARSE_MIN = constants.PITCH_COARSE_MIN;
+var PITCH_COARSE_MAX = constants.PITCH_COARSE_MAX;
 var INVALID_LIVE_API_ID = constants.INVALID_LIVE_API_ID;
 var SHAKERS_MUTE_CONFIG = constants.SHAKERS_MUTE_CONFIG;
 var ticksForRateEnum = constants.ticksForRateEnum;
@@ -33,13 +35,8 @@ var handleError = utils.handleError;
 var parseNotesResponse = utils.parseNotesResponse;
 var findTransposeParameterByName = utils.findTransposeParameterByName;
 var isParameterTransposeDevice = utils.isParameterTransposeDevice;
-var getDeviceParameter = utils.getDeviceParameter;
-var createObserver = utils.createObserver;
 var defer = utils.defer;
-var createLiveAPI = utils.createLiveAPI;
-var releaseLiveAPI = utils.releaseLiveAPI;
-var repointLiveAPI = utils.repointLiveAPI;
-var releaseAllLiveAPI = utils.releaseAllLiveAPI;
+var HandlePool = utils.HandlePool;
 
 var TrackState = stateClasses.TrackState;
 var ClipState = stateClasses.ClipState;
@@ -111,8 +108,13 @@ function SequencerDevice() {
     this.clipState = new ClipState();
     this.transportState = new TransportState();
 
-    // Observer registry
-    this.observerRegistry = new ObserverRegistry();
+    // Every LiveAPI handle this device owns lives in this pool. It is an
+    // instance, not module state, so this device's teardown drain can never
+    // touch another Permute instance's handles. See permute-utils.js.
+    this.handles = new HandlePool();
+
+    // Observer registry (releases its observers back through our pool)
+    this.observerRegistry = new ObserverRegistry(this.handles);
 
     // Clip cache, kept fresh by playing_slot_index / fired_slot_index
     // observers. Reads on the per-tick path are pure cache hits.
@@ -158,10 +160,10 @@ SequencerDevice.prototype.init = function() {
         this.releaseAllHandles();
 
         // Owned for the device's lifetime; re-pointed in _emitStepBroadcast.
-        this._deviceHandle = createLiveAPI("this_device");
+        this._deviceHandle = this.handles.create("this_device");
         var thisDevice = this._deviceHandle;
 
-        var track = createLiveAPI("this_device canonical_parent");
+        var track = this.handles.create("this_device canonical_parent");
 
         if (!track || track.id === INVALID_LIVE_API_ID) {
             if (thisDevice && thisDevice.id !== INVALID_LIVE_API_ID) {
@@ -169,7 +171,7 @@ SequencerDevice.prototype.init = function() {
                 var trackPath = devicePath.substring(0, devicePath.lastIndexOf(" devices"));
                 // Re-point the handle we already own rather than dropping it
                 // and constructing a second one.
-                track = repointLiveAPI(track, trackPath);
+                track = this.handles.repoint(track, trackPath);
             }
         }
 
@@ -218,7 +220,8 @@ SequencerDevice.prototype._releaseInstrumentHandles = function() {
     }
     // Both strategies may hold the same object as instrumentDevice; releasing
     // an already-released handle is a no-op.
-    this.instrumentDevice = releaseLiveAPI(this.instrumentDevice);
+    this.handles.release(this.instrumentDevice);
+    this.instrumentDevice = null;
     this.instrumentDeviceId = null;
 };
 
@@ -238,17 +241,17 @@ SequencerDevice.prototype.releaseAllHandles = function() {
     this.temperatureLoopJumpObserver = null;
     this.temperatureNotesObserver = null;
 
-    this._clipHandle = releaseLiveAPI(this._clipHandle);
+    this._clipHandle = this.handles.release(this._clipHandle);
     this._cachedClip = null;
     this._cachedClipId = null;
     this._cachedClipPath = null;
 
-    this._deviceHandle = releaseLiveAPI(this._deviceHandle);
+    this._deviceHandle = this.handles.release(this._deviceHandle);
 
-    this.trackState.ref = releaseLiveAPI(this.trackState.ref);
+    this.trackState.ref = this.handles.release(this.trackState.ref);
     this.trackState.reset();
 
-    releaseAllLiveAPI();
+    this.handles.releaseAll();
 };
 
 // ===== OBSERVER SETUP =====
@@ -261,7 +264,7 @@ SequencerDevice.prototype.setupDeviceObserver = function() {
 
     var self = this;
 
-    var observer = createObserver(
+    var observer = this.handles.observer(
         this.trackState.ref.path,
         "devices",
         function(args) {
@@ -328,7 +331,7 @@ SequencerDevice.prototype._scheduleDetection = function() {
 SequencerDevice.prototype.setupTransportObserver = function() {
     var self = this;
 
-    var observer = createObserver(
+    var observer = this.handles.observer(
         "live_set",
         "is_playing",
         function(args) {
@@ -363,14 +366,14 @@ SequencerDevice.prototype.setupSlotObservers = function() {
     var self = this;
     var trackPath = this.trackState.ref.path;
 
-    var playingObs = createObserver(trackPath, "playing_slot_index", function(args) {
+    var playingObs = this.handles.observer(trackPath, "playing_slot_index", function(args) {
         var v = args && args.length > 1 ? args[1] : -1;
         self._playingSlotIndex = (typeof v === 'number') ? v : -1;
         self._refreshClipFromSlots();
     });
     this.observerRegistry.register('playing_slot', playingObs);
 
-    var firedObs = createObserver(trackPath, "fired_slot_index", function(args) {
+    var firedObs = this.handles.observer(trackPath, "fired_slot_index", function(args) {
         var v = args && args.length > 1 ? args[1] : -1;
         self._firedSlotIndex = (typeof v === 'number') ? v : -1;
         self._refreshClipFromSlots();
@@ -393,7 +396,7 @@ SequencerDevice.prototype.setupSoloObserver = function() {
 
     var self = this;
 
-    var observer = createObserver(
+    var observer = this.handles.observer(
         this.trackState.ref.path,
         "solo",
         function(args) {
@@ -437,7 +440,7 @@ SequencerDevice.prototype.setupSoloObserver = function() {
 SequencerDevice.prototype.setupTimeSignatureObserver = function() {
     var self = this;
 
-    var observer = createObserver(
+    var observer = this.handles.observer(
         "live_set",
         "signature_numerator",
         function(args) {
@@ -603,7 +606,8 @@ SequencerDevice.prototype.onTransportStop = function() {
                 // Undo audio transformations normally
                 if (this.lastValues[clipId]) {
                     if (this.lastValues[clipId].pitch === 1) {
-                        clip.set("pitch_coarse", 0);
+                        // Back to the clip's own pitch, not a hardcoded 0.
+                        this._restoreAudioClipPitch(clip, clipId);
                     }
                     if (this.lastValues[clipId].mute === 0) {
                         clip.set("gain", this.lastValues[clipId].originalGain || DEFAULT_GAIN_VALUE);
@@ -827,18 +831,99 @@ SequencerDevice.prototype.executeBatchAudio = function(clip, clipId, pending) {
             }
         }
 
-        // Apply pitch (via pitch_coarse) - absolute state
+        // Apply pitch (via pitch_coarse) — relative to the clip's own pitch,
+        // not absolute. Writing a flat 12/0 discarded whatever transposition
+        // the user had dialed into the clip.
         if ('pitch' in pending) {
             if (pending.pitch !== this.lastValues[clipId].pitch) {
-                var shouldShiftUp = (pending.pitch === 1);
-                var pitchValue = shouldShiftUp ? OCTAVE_SEMITONES : 0;
-                clip.set("pitch_coarse", pitchValue);
+                if (pending.pitch === 1) {
+                    this._shiftAudioClipPitchUp(clip, clipId);
+                } else {
+                    this._restoreAudioClipPitch(clip, clipId);
+                }
                 this.lastValues[clipId].pitch = pending.pitch;
             }
         }
     } catch (error) {
         handleError("executeBatchAudio", error, false);
     }
+};
+
+// pitch_coarse is integer semitones; anything beyond this is a real edit.
+var PITCH_COARSE_EPSILON = 1e-3;
+
+/**
+ * Read an audio clip's pitch_coarse as a plain number.
+ * @returns {number|null} - Semitones, or null if the read failed
+ */
+SequencerDevice.prototype._readPitchCoarse = function(clip) {
+    try {
+        var v = clip.get("pitch_coarse");
+        if (v && v.length !== undefined && v[0] !== undefined) return v[0];
+        if (typeof v === 'number') return v;
+    } catch (error) {
+        handleError("_readPitchCoarse", error, false);
+    }
+    return null;
+};
+
+/**
+ * Shift an audio clip up an octave from its CURRENT pitch.
+ *
+ * The clip is unshifted at this instant, so pitch_coarse is by definition the
+ * user's home value — re-reading it here is what lets a re-pitch made since the
+ * last step be honored rather than overwritten.
+ */
+SequencerDevice.prototype._shiftAudioClipPitchUp = function(clip, clipId) {
+    var state = this.lastValues[clipId];
+    if (!state) return;
+
+    var home = this._readPitchCoarse(clip);
+    if (home === null) {
+        // Read failed — fall back to a home we already know, or bail rather
+        // than stamping a guess onto the clip.
+        home = (state.originalPitch === undefined || state.originalPitch === null)
+            ? null : state.originalPitch;
+        if (home === null) return;
+    }
+
+    var shifted = Math.max(PITCH_COARSE_MIN,
+                  Math.min(PITCH_COARSE_MAX, home + OCTAVE_SEMITONES));
+
+    state.originalPitch = home;
+    state.expectedPitch = shifted;
+    clip.set("pitch_coarse", shifted);
+};
+
+/**
+ * Return an audio clip to its home pitch, adopting any re-pitch the user made
+ * while we were holding it shifted (same delta moves home, so the sequencer's
+ * octave stays a constant offset from wherever the user put the clip).
+ *
+ * No-ops when we never shifted this clip — the audio counterpart of
+ * TransposeStrategy's `hasShifted` gate. Without it, the first step-off after
+ * transport start wrote a pitch onto a clip we had never touched.
+ */
+SequencerDevice.prototype._restoreAudioClipPitch = function(clip, clipId) {
+    var state = this.lastValues[clipId];
+    if (!state) return;
+
+    var home = state.originalPitch;
+    if (home === undefined || home === null) return;
+
+    if (state.expectedPitch !== undefined && state.expectedPitch !== null) {
+        var current = this._readPitchCoarse(clip);
+        if (current !== null &&
+            Math.abs(current - state.expectedPitch) > PITCH_COARSE_EPSILON) {
+            home = Math.max(PITCH_COARSE_MIN,
+                   Math.min(PITCH_COARSE_MAX, home + (current - state.expectedPitch)));
+            state.originalPitch = home;
+            debug("executeBatch", "audio clip re-pitched while shifted -> home " + home);
+        }
+    }
+
+    state.expectedPitch = home;
+    clip.set("pitch_coarse", home);
 };
 
 // ===== TEMPERATURE MIXIN =====
@@ -855,6 +940,29 @@ chance.applyChanceMethods(SequencerDevice.prototype);
 // named yet — covers the race where the devices observer fires before Live
 // has populated the rack's parameter list.
 var DETECT_RETRY_DELAYS_MS = [50, 200, 500, 1200];
+
+/**
+ * Wire a freshly built TransposeStrategy to the device's baseline cache, so a
+ * baseline the strategy adopts at write time (a knob move, automation, an undo)
+ * is what seeds the next rebuilt strategy — rather than the value captured back
+ * when the instrument was first detected.
+ *
+ * No observer here on purpose: the strategy reconciles by reading the param
+ * immediately before each write. See ADR-013 for why a listener bound inside
+ * the instrument's subtree is not worth its cost.
+ *
+ * @param {TransposeStrategy} strategy - Strategy to wire (already assigned)
+ * @param {string} deviceId - Live device id, key into transposeBaselines
+ */
+SequencerDevice.prototype._wireTransposeStrategy = function(strategy, deviceId) {
+    if (!strategy) return;
+
+    var self = this;
+
+    strategy.onBaselineChanged = function(value) {
+        if (deviceId) self.transposeBaselines[deviceId] = value;
+    };
+};
 
 /**
  * Detect instrument and configure transpose strategy.
@@ -879,7 +987,7 @@ SequencerDevice.prototype.detectInstrumentType = function() {
     if (this.trackState.type !== 'midi') return;
 
     // Find instrument device on track
-    var result = InstrumentDetector.findInstrumentDevice(this.trackState.ref);
+    var result = InstrumentDetector.findInstrumentDevice(this.trackState.ref, this.handles);
     if (!result) {
         debug("instrument", "No instrument device found");
         return;
@@ -896,7 +1004,7 @@ SequencerDevice.prototype.detectInstrumentType = function() {
     // candidates for parameter-based transposition (with fallback to note_transpose
     // if no named param is found on those devices either).
     if (isParameterTransposeDevice(result.device)) {
-        var transposeResult = findTransposeParameterByName(result.device);
+        var transposeResult = findTransposeParameterByName(result.device, this.handles);
         if (transposeResult) {
             this.instrumentType = 'parameter_transpose';
             // First time seeing this device: snapshot the param NOW, before
@@ -922,8 +1030,10 @@ SequencerDevice.prototype.detectInstrumentType = function() {
                 transposeResult.param,
                 transposeResult.shiftAmount,
                 transposeResult.name,
-                cachedBaseline
+                cachedBaseline,
+                this.handles
             );
+            this._wireTransposeStrategy(this.instrumentStrategy, result.deviceId);
             debug("instrument", "Found transpose param '" + transposeResult.name +
                   "' at index " + transposeResult.index +
                   " (shift: " + transposeResult.shiftAmount + ")");
@@ -956,7 +1066,8 @@ SequencerDevice.prototype.detectInstrumentType = function() {
                 result.device,
                 SHAKERS_MUTE_CONFIG.paramIndex,
                 SHAKERS_MUTE_CONFIG.mutedValue,
-                SHAKERS_MUTE_CONFIG.playingValue
+                SHAKERS_MUTE_CONFIG.playingValue,
+                this.handles
             );
             debug("instrument", "Shakers rack detected — using paramIndex " +
                 SHAKERS_MUTE_CONFIG.paramIndex + " for mute");
@@ -995,7 +1106,7 @@ SequencerDevice.prototype.scheduleDetectionRetries = function(attemptIndex) {
         }
         if (!isParameterTransposeDevice(self.instrumentDevice)) return;
 
-        var transposeResult = findTransposeParameterByName(self.instrumentDevice);
+        var transposeResult = findTransposeParameterByName(self.instrumentDevice, self.handles);
         if (transposeResult) {
             self.instrumentType = 'parameter_transpose';
             // Release the outgoing strategy's own param handle before it is
@@ -1003,8 +1114,8 @@ SequencerDevice.prototype.scheduleDetectionRetries = function(attemptIndex) {
             // here — the incoming strategy takes over that same handle.
             if (self.instrumentStrategy && self.instrumentStrategy.transposeParam &&
                 self.instrumentStrategy.transposeParam !== transposeResult.param) {
-                self.instrumentStrategy.transposeParam =
-                    releaseLiveAPI(self.instrumentStrategy.transposeParam);
+                self.handles.release(self.instrumentStrategy.transposeParam);
+                self.instrumentStrategy.transposeParam = null;
             }
             var cachedBaseline = self.transposeBaselines[self.instrumentDeviceId];
             // Same as the synchronous path: if we've never seen this device,
@@ -1028,8 +1139,10 @@ SequencerDevice.prototype.scheduleDetectionRetries = function(attemptIndex) {
                 transposeResult.param,
                 transposeResult.shiftAmount,
                 transposeResult.name,
-                cachedBaseline
+                cachedBaseline,
+                self.handles
             );
+            self._wireTransposeStrategy(self.instrumentStrategy, self.instrumentDeviceId);
             debug("instrument", "Retry " + attemptIndex + " succeeded — found '" +
                   transposeResult.name + "' after " + delayMs + "ms" +
                   (cachedBaseline !== undefined ? " (seeded baseline=" + cachedBaseline + ")" : ""));
@@ -1077,7 +1190,7 @@ SequencerDevice.prototype._refreshClipFromSlots = function() {
         // per-launch constructor call did, but the previous target's handle is
         // no longer dropped undetached — in steady state this creates no
         // orphans at all, rather than cleaning up after them.
-        this._clipHandle = repointLiveAPI(this._clipHandle, clipPath);
+        this._clipHandle = this.handles.repoint(this._clipHandle, clipPath);
         var clip = this._clipHandle;
         if (clip && clip.id !== INVALID_LIVE_API_ID) {
             this._setCachedClip(clip, clipPath);
@@ -1232,7 +1345,7 @@ SequencerDevice.prototype._emitStepBroadcast = function(seqName, newStep) {
         // immediately — but this used to orphan two attached handles on every
         // step change of every sequencer, by far the fastest orphan source in
         // the device.
-        this._deviceHandle = repointLiveAPI(this._deviceHandle, "this_device");
+        this._deviceHandle = this.handles.repoint(this._deviceHandle, "this_device");
         var thisDevice = this._deviceHandle;
         // \b excludes "return_tracks N" (word boundary fails between "_"
         // and "tracks", both \w) so a return-track path falls through to -1

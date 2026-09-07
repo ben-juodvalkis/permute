@@ -1,5 +1,15 @@
 # Permute
 
+> **Frozen — 2026-09-07.** This repository is the last standalone release of the
+> *fat* Permute: the device that carries its own sequencer engine in Max and works
+> without anything else installed. Development moved to
+> [Looping](https://github.com/ben-juodvalkis/Looping): the device there
+> (`ableton/M4L devices/Permute/Permute.amxd`) keeps only the 22 pattern
+> parameters and the Python control surface (`SequencerComponent`) is the
+> engine — see [ADR-020](docs/adr/020-thin-client-of-the-looping-surface.md)
+> here and ADR-429 in Looping. Nothing in this repository changes after the
+> `v3.4-final-standalone` tag.
+
 A multi-transformation Max4Live device for Ableton Live that provides mute sequencing, pitch sequencing, note chance, and organic loop variation.
 
 ## Features
@@ -112,6 +122,7 @@ Enable comprehensive logging:
 
 ## Version History
 
+- **v3.4** (final standalone release, 2026-09-07): OSC step telemetry (ADR-017), the pitch baseline following user edits (ADR-019), the LiveAPI handle-ownership fixes (ADR-018); frozen here — the thin device and its surface engine live in Looping (ADR-020)
 - **v3.3**: UI-native revamp — removed OSC, removed `request_ui_values` handshake, per-step `live.toggle` objects replace bulk pattern messages (ADR-010)
 - **v3.2**: Note chance (probability) feature (ADR-009)
 - **v3.1**: Note ID-based temperature tracking for reversible transformations
